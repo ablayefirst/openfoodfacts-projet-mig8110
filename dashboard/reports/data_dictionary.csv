@@ -1,0 +1,22 @@
+Champ,Description,Type,Exemple,Remplissage,Utilité_projet
+code,Code-barres / identifiant produit (clé primaire logique),int64,264,100.0%,ESSENTIEL
+product_name,Nom du produit,object,corn bread,100.0%,IMPORTANT
+brands,Marque(s),object,Bofrost,73.8%,IMPORTANT
+labels_tags,"Labels et certifications normalisés (bio, vegan, halal, etc.)",object,en:no-gluten,47.4%,IMPORTANT
+categories,Catégories (texte libre),object,multi vitaminico,100.0%,IMPORTANT
+categories_tags,Catégories (tags normalisés),object,it:multi-vitaminico,100.0%,ESSENTIEL
+nutriscore_grade,Nutri-Score (A–E),object,c,85.1%,ESSENTIEL
+energy_100g,Énergie (kJ/100g),float64,389.0,99.7%,ESSENTIEL
+energy-kcal_100g,Énergie (kcal/100g),float64,93.0,99.6%,ESSENTIEL
+sugars_100g,Sucres (g/100g),float64,2.20000004768372,96.5%,ESSENTIEL
+fat_100g,Matières grasses (g/100g),float64,2.29999995231628,99.8%,ESSENTIEL
+saturated-fat_100g,Acides gras saturés (g/100g),float64,1.39999997615814,95.6%,ESSENTIEL
+salt_100g,Sel (g/100g),float64,1.2,91.1%,ESSENTIEL
+fiber_100g,Fibres (g/100g),float64,1.10000002384186,70.2%,ESSENTIEL
+proteins_100g,Protéines (g/100g),float64,4.30000019073486,99.8%,ESSENTIEL
+ingredients_text,Liste des ingrédients (texte brut),object,"Soy Protein Isolate, Fructose, Cellulose Powder, C...",52.9%,IMPORTANT
+countries,Pays de vente (texte),object,en:ca,100.0%,IMPORTANT
+countries_tags,Pays (tags normalisés),object,en:canada,100.0%,IMPORTANT
+nova_group,Groupe NOVA (1–4),float64,4.0,51.8%,IMPORTANT
+image_small_url,"URL image (petite, rapide pour l’affichage)",object,https://images.openfoodfacts.org/images/products/i...,98.7%,IMPORTANT
+image_url,URL image (taille normale),object,https://images.openfoodfacts.org/images/products/i...,98.7%,IMPORTANT

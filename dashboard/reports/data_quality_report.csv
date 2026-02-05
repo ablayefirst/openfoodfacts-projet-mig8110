@@ -1,0 +1,22 @@
+Champ,Description,Type,Remplissage_%,Nulls,Statistiques,Priorité
+code,Code-barres / identifiant produit (clé primaire logique),int64,100.0,0,"moy=785738208776.15, écart-type=3578974549551.91, min=264.00, max=300100010018067.00",BASSE
+product_name,Nom du produit,object,100.0,0,"19291 valeurs uniques, top='Kombucha'",BASSE
+brands,Marque(s),object,73.84,6276,"5969 valeurs uniques, top='Compliments'",MOYENNE
+labels_tags,"Labels et certifications normalisés (bio, vegan, halal, etc.)",object,47.43,12612,"3484 valeurs uniques, top='en:no-gluten'",HAUTE
+categories,Catégories (texte libre),object,100.0,0,"9055 valeurs uniques, top='Boissons, Produits fermentés, Boissons fermentées, Boissons au thé, Kombuchas'",BASSE
+categories_tags,Catégories (tags normalisés),object,100.0,0,"6088 valeurs uniques, top='en:snacks,en:sweet-snacks,en:confectioneries,en:candies'",BASSE
+nutriscore_grade,Nutri-Score (A–E),object,85.09,3577,"5 valeurs uniques, top='e'",BASSE
+energy_100g,Énergie (kJ/100g),float64,99.66,81,"moy=2910.87, écart-type=270589.08, min=0.00, max=41840000.00",BASSE
+energy-kcal_100g,Énergie (kcal/100g),float64,99.56,106,"moy=696.56, écart-type=64706.18, min=0.00, max=10000000.00",BASSE
+sugars_100g,Sucres (g/100g),float64,96.53,833,"moy=13.71, écart-type=21.64, min=0.00, max=1000.00",BASSE
+fat_100g,Matières grasses (g/100g),float64,99.77,55,"moy=13.61, écart-type=19.23, min=0.00, max=356.00",BASSE
+saturated-fat_100g,Acides gras saturés (g/100g),float64,95.62,1050,"moy=4.71, écart-type=8.58, min=0.00, max=111.00",BASSE
+salt_100g,Sel (g/100g),float64,91.13,2127,"moy=7.13, écart-type=629.64, min=0.00, max=92500.00",BASSE
+fiber_100g,Fibres (g/100g),float64,70.21,7146,"moy=3.14, écart-type=6.09, min=0.00, max=306.00",MOYENNE
+proteins_100g,Protéines (g/100g),float64,99.8,47,"moy=8.10, écart-type=10.75, min=0.00, max=255.00",BASSE
+ingredients_text,Liste des ingrédients (texte brut),object,52.89,11301,"12098 valeurs uniques, top='Carbonated water, Natural flavour'",MOYENNE
+countries,Pays de vente (texte),object,100.0,0,"488 valeurs uniques, top='en:ca'",BASSE
+countries_tags,Pays (tags normalisés),object,100.0,0,"253 valeurs uniques, top='en:canada'",BASSE
+nova_group,Groupe NOVA (1–4),float64,51.79,11565,"moy=3.34, écart-type=1.02, min=1.00, max=4.00",MOYENNE
+image_small_url,"URL image (petite, rapide pour l’affichage)",object,98.7,312,"23677 valeurs uniques, top='https://images.openfoodfacts.org/images/products/982/266/300/1696/front_fr.3.200.jpg'",BASSE
+image_url,URL image (taille normale),object,98.7,312,"23677 valeurs uniques, top='https://images.openfoodfacts.org/images/products/982/266/300/1696/front_fr.3.400.jpg'",BASSE
