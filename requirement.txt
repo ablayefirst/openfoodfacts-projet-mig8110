@@ -24,4 +24,4 @@ tqdm>=4.66.0
 matplotlib>=3.7.0
 seaborn>=0.12.0
 jupyter>=1.0.0          # Pour les notebooks
-ipykernel>=6.0.0        # Pour les notebooks
+ipykernel>=6.0.0        # Pour les notebooks 
