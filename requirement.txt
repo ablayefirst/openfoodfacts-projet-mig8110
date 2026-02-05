@@ -1,0 +1,22 @@
+# Core
+pandas>=2.0.0
+numpy>=1.24.0
+pyarrow>=12.0.0
+
+# Database
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0  # ou sqlite3
+
+# Data validation
+great-expectations>=0.18.0  # ou pandera
+pydantic>=2.0.0
+
+# Web/API
+streamlit>=1.28.0
+fastapi>=0.104.0
+uvicorn>=0.24.0
+
+# Utils
+python-dotenv>=1.0.0
+pyyaml>=6.0
+tqdm>=4.66.0

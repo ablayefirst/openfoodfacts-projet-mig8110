@@ -1,0 +1,42 @@
+# Données
+data/raw/*.csv
+data/raw/*.json
+data/bronze/*.parquet
+data/silver/*.parquet
+data/gold/*.parquet
+*.db
+*.sqlite
+*.db-journal
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+.env
+.env.local
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Docker
+docker-compose.override.yml
