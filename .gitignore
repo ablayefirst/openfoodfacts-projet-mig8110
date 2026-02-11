@@ -40,3 +40,13 @@ logs/
 
 # Docker
 docker-compose.override.yml
+
+# Ignore datasets lourds
+data/dataset/
+
+# Ignore tous les CSV
+*.csv
+
+# Ignore fichiers temporaires Python
+__pycache__/
+*.pyc
