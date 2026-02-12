@@ -1,0 +1,133 @@
+Rapport d'architecture et guide de contenu
+=========================================
+
+But
+----
+Ce document décrit l'architecture globale du projet OpenFoodFacts (référence locale), et précise ce qui doit se trouver dans chaque dossier du dépôt. Il sert de guide pour les contributeurs, les opérations et la maintenance.
+
+Vue d'ensemble
+--------------
+- Langage principal : Python
+- Base de données : PostgreSQL (migrations et scripts dans `database/`)
+- Structure orientée ETL / pipeline de données (dossiers `data/`, `database/`, `src/`)
+- Conteneurisation possible via `docker/`
+
+Principes généraux
+-------------------
+- Chaque dossier possède un README ou un fichier d'aide expliquant son rôle.
+- Les scripts exécutables doivent être dans `scripts/` et documentés.
+- Les transformations de données et le code applicatif sont dans `src/`.
+- Les données brutes, intermédiaires et enrichies sont séparées dans `data/bronze`, `data/silver`, `data/gold`.
+
+Organisation détaillée par dossier
+---------------------------------
+
+`config/`
+- Contient les fichiers de configuration (YAML, JSON, .env.example).
+- Doit inclure : paramètres de connexion DB, chemins de stockage, paramètres d'ingestion, variables d'environnement sensibles listées dans `.env.example` (ne jamais committer les secrets).
+- Exemple de fichiers : `config.yaml`, `logging.conf`, `.env.example`.
+
+`dashboard/`
+- Code et assets pour tableaux de bord et visualisations.
+- `static/` contient fichiers CSS/JS/images pour le front.
+- Doit inclure un README expliquant comment démarrer le dashboard (commande, port, dépendances).
+
+`data/`
+- Structure prévue :
+  - `raw/` : données importées brutes (ne jamais modifier en place).
+  - `bronze/` : ingestion initiale, copies nettoyées mais non transformées.
+  - `silver/` : données normalisées, jointures et corrections.
+  - `gold/` : tables finales analytiques prêtes pour requêtes/BI.
+- Chaque sous-dossier doit contenir un fichier `README.md` décrivant le schéma attendu et la provenance des fichiers.
+- Ne pas stocker de données sensibles ou personnelles non pseudonymisées.
+
+`database/`
+- `migrations/` : scripts SQL ou migrations (ex : Alembic) pour versionner le schéma.
+- `schema/` : définitions SQL de tables (ex : `create_tables.sql`, `staging.sql`).
+- `queries/` : requêtes SQL réutilisables, scripts de chargement `load_*.sql` et utilitaires `load_data.py`.
+- `Readme.md` : instructions pour initialiser la base, exécuter migrations et charger jeux de données.
+- Bonnes pratiques :
+  - Toutes les migrations doivent être idempotentes.
+  - Fournir commandes d'exécution (psql, docker-compose, ou gestionnaire de migrations).
+
+`docker/`
+- Contient dockerfiles et compose files pour exécuter la stack locale (DB, app, dashboard).
+- Inclure : `docker-compose.yml`, `Dockerfile.app`, scripts d'initialisation.
+- README expliquant comment démarrer en local et variables d'environnement nécessaires.
+
+`docs/`
+- Documentation projet (mettre ici guides, politiques, notes de réunion importantes).
+- Ajouter le présent fichier `ARCHITECTURE_REPORT.txt` et tout doc technique additionnel.
+
+`notebooks/`
+- Notebooks d'exploration, analyses et démonstrations (Jupyter).
+- Chaque notebook doit commencer par un en-tête expliquant l'objectif et les prérequis (env, dataset).
+
+`scripts/`
+- Utilitaires CLI, scripts d'automatisation et d'orchestration.
+- Exemples : ingestion, transformation, nettoyage, orchestration de pipeline.
+- Documenter l'usage en tête de chaque script (arguments, variables d'environnement requises).
+
+`src/`
+- Code source principal de l'application.
+- Organisation recommandée : package `openfoodfacts/` avec sous-modules `etl`, `models`, `db`, `api`, `utils`.
+- `etl/` : fonctions et classes pour ingestion et transformations.
+- `models/` : classes de domaine et schémas (pydantic/dataclasses) si pertinent.
+- `db/` : abstraction d'accès à la base et utilitaires de migration/connexion.
+- `api/` : endpoints (si app web), tests unitaires associés.
+- Fournir un `__main__` ou point d'entrée pour exécuter tâches courantes.
+
+`tests/`
+- Tests unitaires et d'intégration. Structure miroir de `src/` (ex : `tests/test_etl.py`).
+- Fournir instructions pour exécuter les tests (ex : `pytest`), et un fichier `requirements-test.txt` si nécessaire.
+
+Fichiers racine importants
+--------------------------
+- `README.md` : guide d'introduction, architecture résumée, commandes d'installation rapide.
+- `requirement.txt` : dépendances Python (ou `pyproject.toml` si utilisé).
+- `PostgreSQL OpenFoodFacts.session.sql` : session SQL (documenter son usage et contenu).
+
+pratiques et recommandations
+----------------------------------
+- Versionner les schémas et migrations dans `database/migrations/`.
+- Ajouter des fichiers `README.md` dans chaque dossier majeur.
+- Rédiger des conventions de nommage (fichiers, tables, colonnes) dans `docs/`.
+- Mettre en place CI basique : lint (flake8/ruff), tests, validation SQL/migrations.
+- Sauvegarder et documenter les commandes d'initialisation DB et chargement de données.
+
+Commandes utiles (exemples)
+---------------------------
+Pour installer les dépendances :
+
+```
+pip install -r requirement.txt
+```
+
+Pour exécuter les migrations (exemple avec psql) :
+
+```
+psql -h <host> -U <user> -d <db> -f database/schema/create_tables.sql
+```
+
+Pour charger les données de staging :
+
+```
+python database/queries/load_data.py --source data/silver/openfoodfacts_clean.csv --db-url "postgresql://postgres:admin@localhost:5432/openfoodfacts_canada"
+
+Pour lancer les tests :
+
+```
+pytest -q
+```
+
+Prochaines étapes recommandées
+------------------------------
+1) Relire ce rapport et ajouter détails manquants propres au projet (noms de services, variables d'envs exactes).
+2) Ajouter un `README.md` dans chaque dossier listé si absent.
+3) Mettre en place CI pour tests/migrations/lint.
+
+Contact / Maintien
+-------------------
+Indiquer les personnes-ressources et leurs responsabilités dans un fichier `docs/MAINTAINERS.md`.
+
+Fin du rapport
