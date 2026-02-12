@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Détails produit</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="container">
+
+  <div class="header">
+    <div class="brand">
+      <div class="logo"></div>
+      <div>
+        <h1>Détails produit</h1>
+        <p>Fiche issue d’OpenFoodFacts</p>
+      </div>
+    </div>
+    <div class="headerActions">
+      <a class="btn btn-ghost" href="/">← Retour</a>
+      <a class="btn" href="{{ p.off_url }}" target="_blank">OpenFoodFacts</a>
+    </div>
+  </div>
+
+  <div class="panel">
+
+    <h2 class="prodName">{{ p.product_name if p.product_name else "(Sans nom)" }}</h2>
+    <div class="sub">Marque : <b>{{ p.brands if p.brands else "-" }}</b></div>
+    <div class="sub">Code-barres : <span class="mono">{{ p.code }}</span></div>
+
+    <div class="hr"></div>
+
+    <!-- IMAGE PRODUIT (grande) -->
+    {% if p.images and p.images.front_large %}
+    <div class="panel inner">
+      <h3 style="margin-top:0;">Image du produit</h3>
+      <div class="heroSimple">
+        <img class="heroSimpleImg"
+             src="{{ p.images.front_large }}"
+             alt="Image produit">
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- BARCODE -->
+    <div class="panel inner">
+      <h3 style="margin-top:0;">Code-barres</h3>
+      <img class="barcode-img"
+           src="/barcode/{{ p.code }}.png"
+           alt="Code-barres">
+    </div>
+
+    <!-- SCORES -->
+    <div class="scoreCol">
+
+      <div class="scoreCard">
+        <div class="scoreTitle">NutriScore</div>
+        {% if p.nutriscore_grade %}
+          <div class="scoreBig ns-{{ p.nutriscore_grade|lower }}">
+            {{ p.nutriscore_grade|upper }}
+          </div>
+        {% else %}
+          <div class="scoreBig neutral">—</div>
+        {% endif %}
+      </div>
+
+      <div class="scoreCard">
+        <div class="scoreTitle">Score nutritionnel</div>
+        {% if p.nutriscore_score %}
+          <div class="scoreBig blue">{{ p.nutriscore_score }}</div>
+        {% else %}
+          <div class="scoreBig neutral">—</div>
+        {% endif %}
+      </div>
+
+      <div class="scoreCard">
+        <div class="scoreTitle">Allergènes</div>
+        {% if p.allergens_display %}
+          <div class="scoreBig warn">!</div>
+          <div class="small">Présents / Traces</div>
+        {% else %}
+          <div class="scoreBig ok">✓</div>
+          <div class="small">Non renseignés</div>
+        {% endif %}
+      </div>
+
+    </div>
+
+    <!-- ALLERGENES / TRACES (détails texte) -->
+    <div class="panel inner">
+      <h3>Allergènes & traces</h3>
+      <div class="small" style="line-height:1.7;">
+        {{ p.allergens_display if p.allergens_display else "Non renseignés." }}
+      </div>
+    </div>
+
+    <!-- INGREDIENTS -->
+    <div class="panel inner">
+      <h3>Ingrédients</h3>
+      <div class="small" style="line-height:1.7;">
+        {{ p.ingredients_text if p.ingredients_text else "Ingrédients non renseignés." }}
+      </div>
+    </div>
+
+    <!-- VALEURS NUTRITIONNELLES (g/100g) -->
+    <div class="panel inner">
+      <h3>Valeurs nutritionnelles (pour 100 g)</h3>
+
+      {% if p.nutrition_rows and p.nutrition_rows|length > 0 %}
+        <table class="nutri-table">
+          {% for n in p.nutrition_rows %}
+          <tr>
+            <th>{{ n.label }}</th>
+            <td>
+              {{ n.value }}
+              {% if n.unit %} {{ n.unit }}{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </table>
+      {% else %}
+        <div class="small">Données nutritionnelles non renseignées.</div>
+      {% endif %}
+    </div>
+
+  </div>
+</div>
+</body>
+</html>
