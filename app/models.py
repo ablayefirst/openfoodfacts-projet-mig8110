@@ -1,17 +1,26 @@
 from sqlalchemy.orm import declarative_base
-from sqlalchemy import Column, String, Integer
+from sqlalchemy import Column, String, Integer, BigInteger, Text
 
 Base = declarative_base()
 
 class Product(Base):
-    __tablename__ = "products"   # <-- change ici si ton binôme a un autre nom
+    __tablename__ = "produit"
 
-    code = Column(String, primary_key=True, index=True)
-    product_name = Column(String)
-    brands = Column(String)
-    categories = Column(String)
-    categories_tags = Column(String)
-    allergens_tags = Column(String)
-    nutriscore_grade = Column(String)    # correspond à off:nutriscore_grade
-    nutriscore_score = Column(Integer)   # correspond à off:nutriscore_score
-    ingredients_text = Column(String)
+    code_produit = Column(BigInteger, primary_key=True)
+
+    nom_produit = Column(Text)
+    quantite = Column(Text)
+
+    nutrition_grade = Column(String)
+    nutriscore_score = Column(Integer)
+    nova_group = Column(Integer)
+
+    url = Column(Text)
+
+    image_url = Column(Text)
+    image_small_url = Column(Text)
+    image_ingredients_url = Column(Text)
+    image_ingredients_small_url = Column(Text)
+    image_nutrition_url = Column(Text)
+
+    id_marque = Column(Integer)

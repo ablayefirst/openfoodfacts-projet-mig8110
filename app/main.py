@@ -42,7 +42,9 @@ from sqlalchemy.types import String as SQLString
 from app.db import SessionLocal
 from app.models import Product
 
-
+from sqlalchemy import case, cast
+from sqlalchemy.types import Integer, String
+from app.models import Product
 
 app = FastAPI()
 templates = Jinja2Templates(directory="app/templates")
@@ -376,50 +378,6 @@ def fuzzy_fallback(frame: pd.DataFrame, query: str, limit: int = 24, min_score: 
     top_idx = [i for i, _ in scored[:limit]]
     return frame.loc[top_idx] if top_idx else frame.head(0)
 
-
-# =========================
-# 7) Tri / filtres (CSV) (gardé)
-# =========================
-def apply_sort(frame: pd.DataFrame, sort: str) -> pd.DataFrame:
-
-    # 🔹 Tri par nom (A → Z)
-    if sort == "name":
-        return frame.sort_values("product_name", ascending=True, kind="mergesort")
-
-    # 🔹 Tri par NutriScore (A → E)
-    if sort == "nutriscore" and COL_NS_GRADE:
-        grade_order = {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}
-        tmp = frame[COL_NS_GRADE].astype(str).str.lower().map(grade_order).fillna(999)
-        return (
-            frame
-            .assign(_g=tmp)
-            .sort_values("_g", ascending=True, kind="mergesort")
-            .drop(columns=["_g"])
-        )
-
-    # 🔹 Tri par score nutritionnel (du plus petit au plus grand)
-    if sort == "score" and COL_NS_SCORE:
-        score_num = pd.to_numeric(frame[COL_NS_SCORE], errors="coerce")
-        return (
-            frame
-            .assign(_s=score_num)
-            .sort_values("_s", ascending=True, kind="mergesort")
-            .drop(columns=["_s"])
-        )
-
-    return frame
-
-
-
-def rows_for_index(frame: pd.DataFrame, limit: int = 24) -> list[dict]:
-    out = []
-    for _, r in frame.head(limit).iterrows():
-        d = r.to_dict()
-        d["images"] = off_images(d.get(COL_CODE, ""))
-        out.append(d)
-    return out
-
-
 # =========================
 # 7.1) Helpers DB (ajout)
 # =========================
@@ -449,14 +407,34 @@ def product_to_dict_db(p: Product) -> dict:
     return d
 
 
-def apply_sort_db(query_db, sort: str, order: str):
-    asc = (order != "desc")
+def apply_sort_db(query_db, sort: str):
     if sort == "name":
-        return query_db.order_by(Product.product_name.asc() if asc else Product.product_name.desc())
+        # tri alphabétique propre (NULL/"" à la fin)
+        return query_db.order_by(
+            case((Product.product_name == None, 1), else_=0),
+            case((Product.product_name == "", 1), else_=0),
+            Product.product_name.asc()
+        )
+
     if sort == "nutriscore":
-        return query_db.order_by(Product.nutriscore_grade.asc() if asc else Product.nutriscore_grade.desc())
+        # A->E, puis vides à la fin
+        order_map = case(
+            (cast(Product.nutriscore_grade, String) == "a", 1),
+            (cast(Product.nutriscore_grade, String) == "b", 2),
+            (cast(Product.nutriscore_grade, String) == "c", 3),
+            (cast(Product.nutriscore_grade, String) == "d", 4),
+            (cast(Product.nutriscore_grade, String) == "e", 5),
+            else_=999
+        )
+        return query_db.order_by(order_map.asc())
+
     if sort == "score":
-        return query_db.order_by(Product.nutriscore_score.asc() if asc else Product.nutriscore_score.desc())
+        # plus petit score = meilleur (si tu veux l’inverse, mets desc())
+        return query_db.order_by(
+            case((Product.nutriscore_score == None, 1), else_=0),
+            cast(Product.nutriscore_score, Integer).asc()
+        )
+
     return query_db
 
 
@@ -488,22 +466,6 @@ def home(request: Request):
         finally:
             db.close()
 
-    # ✅ CSV fallback
-    rows = rows_for_index(df, limit=24)
-    return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
-            "products": rows,
-            "q": "",
-            "category": "",
-            "allergen": "",
-            "allergen_mode": "exclude",
-            "sort": "name",
-            "order": "asc",
-            "used_fuzzy": False,
-        },
-    )
 
 
 @app.get("/search", response_class=HTMLResponse)
