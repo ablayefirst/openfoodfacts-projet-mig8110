@@ -1,0 +1,17 @@
+=== RÉSUMÉ — ANALYSE DE QUALITÉ  ===
+
+Date: 2026-02-05 12:29:06.206159
+Taille échantillon: 23989 produits
+Champs cruciaux analysés: 21
+
+CHAMPS À SURVEILLER (CRITIQUE/HAUTE):
+• labels_tags: 47.4% rempli — Labels et certifications normalisés (bio, vegan, halal, etc.)
+
+DISPONIBILITÉ NUTRI-SCORE:
+• nutriscore_grade: 85.1% rempli
+
+MOYENNES NUTRITIONNELLES (si disponibles):
+• sugars_100g: moy=13.71 (remplissage=96.5%)
+• fat_100g: moy=13.61 (remplissage=99.8%)
+• salt_100g: moy=7.13 (remplissage=91.1%)
+• energy-kcal_100g: moy=696.56 (remplissage=99.6%)
