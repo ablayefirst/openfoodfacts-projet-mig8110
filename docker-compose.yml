@@ -1,0 +1,21 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app/app
+      - ./data:/app/data
+    environment:
+      DATABASE_URL: postgresql+psycopg2://openfood:openfood@db:5432/openfood
+    depends_on:
+      - db
+
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: openfood
+      POSTGRES_PASSWORD: openfood
+      POSTGRES_DB: openfood
+    ports:
+      - "5433:5432"
