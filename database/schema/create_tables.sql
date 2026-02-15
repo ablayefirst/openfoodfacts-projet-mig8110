@@ -21,10 +21,24 @@ DROP TABLE IF EXISTS produit CASCADE;
 -- TABLES PRINCIPALES
 -- =====================================================
 
+-- NOTE GLOBALE:
+-- - Les colonnes marquées UNIQUE servent à empêcher l'insertion
+--   d'entités en double (ex: deux lignes `ingredient` avec le même
+--   `ingredients_nom`). Le script Python de chargement s'appuie sur
+--   cette contrainte + des requêtes SELECT préalables pour éviter
+--   la duplication dans les tables de lookup.
+-- - Les actions `ON DELETE CASCADE` et `ON DELETE SET NULL` définies
+--   sur les clés étrangères contrôlent le comportement de suppression
+--   afin d'éviter des références orphelines et garantir la cohérence.
+
+
 CREATE TABLE marque (
     id_marque SERIAL PRIMARY KEY,
     brands TEXT UNIQUE NOT NULL
 );
+
+-- `marque.brands` est UNIQUE : si deux produits ont la même marque,
+-- la table ne contiendra qu'une seule entrée pour cette marque.
 
 CREATE TABLE categorie (
     id_categorie SERIAL PRIMARY KEY,
@@ -38,10 +52,17 @@ CREATE TABLE pays (
     countries_en TEXT UNIQUE NOT NULL
 );
 
+-- `pays.countries_en` est UNIQUE pour éviter les doublons comme
+-- "Canada" / "Canada" lors de l'insertion.
+
 CREATE TABLE ingredient (
     id_ingredient SERIAL PRIMARY KEY,
     ingredients_nom TEXT UNIQUE NOT NULL
 );
+
+-- `ingredient.ingredients_nom` UNIQUE : facilite la déduplication
+-- lors du chargement. Le script découpe `ingredients_text` du CSV
+-- et réutilise ou crée les entrées selon l'existence.
 
 CREATE TABLE allergene (
     allergen_id SERIAL PRIMARY KEY,
@@ -78,6 +99,11 @@ CREATE TABLE produit (
     id_marque INTEGER REFERENCES marque(id_marque) ON DELETE SET NULL
 );
 
+-- Remarque: `code_produit` est un BIGINT pour accepter de grands codes
+-- numériques. Si le loader fournit des chaînes (ex: '264'), PostgreSQL
+-- tentera une conversion implicite; il est préférable de fournir un
+-- entier pour éviter toute ambiguïté.
+
 -- =====================================================
 -- VALEURS NUTRITIONNELLES (1-1)
 -- =====================================================
@@ -96,6 +122,8 @@ CREATE TABLE valeurs_nutritionnelles (
     fat_100g NUMERIC
 );
 
+-- Table 1-1: suppression en cascade si le produit est supprimé.
+
 -- =====================================================
 -- TABLES D'ASSOCIATION (N-N)
 -- =====================================================
@@ -111,6 +139,11 @@ CREATE TABLE produit_ingredient (
     id_ingredient INTEGER REFERENCES ingredient(id_ingredient) ON DELETE CASCADE,
     PRIMARY KEY (code_produit, id_ingredient)
 );
+
+-- Les tables d'association ont une PK composite afin d'empêcher la
+-- duplication des relations (ex: ne pas lier deux fois le même
+-- produit au même ingrédient). Cela fonctionne bien avec
+-- `INSERT ... ON CONFLICT DO NOTHING` côté loader.
 
 CREATE TABLE produit_pays (
     code_produit BIGINT REFERENCES produit(code_produit) ON DELETE CASCADE,
