@@ -40,3 +40,22 @@ logs/
 
 # Docker
 docker-compose.override.yml
+
+
+# ---- Airflow ----
+logs/
+airflow_logs/
+airflow.db
+
+# ---- Docker / volumes ----
+data/
+postgres_data/
+minio_data/
+*.log
+
+# ---- Datasets / outputs ----
+*.csv
+*.jsonl
+*.parquet
+*.gz
+EOF
