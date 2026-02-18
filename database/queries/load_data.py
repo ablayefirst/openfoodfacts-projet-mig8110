@@ -5,12 +5,43 @@ from pathlib import Path
 import pandas as pd
 from sqlalchemy import create_engine, text
 
+# --------------------------------------------------------------------
+# Script de chargement CSV → base de données
+# - Ce fichier lit un CSV nettoyé d'OpenFoodFacts et insère les données
+#   dans la base PostgreSQL définie par `DEFAULT_DATABASE_URL` ou
+#   passée via `--db-url`.
+# - Mapping important (CSV colonne → colonne BDD):
+#     - `code`/`code_produit`  : identifiant produit (clé primaire)
+#     - `product_name` → `nom_produit`
+#     - `brands` → table `marque.brands` (unique)
+#     - `categories` → table `categorie.categorie` (séparées par `,`)
+#     - `ingredients_text` → table `ingredient.ingredients_nom` (séparées par `,`)
+#     - `labels`, `countries_en`, `allergens` → tables de lookup respectives
+#     - diverses colonnes nutritionnelles → `valeurs_nutritionnelles`
+# - Protection contre la duplication:
+#     - Tables lookup (ingredient, label, etc.) ont une colonne `UNIQUE`.
+#       Le code vérifie l'existence puis insère si nécessaire.
+#     - `produit` et `valeurs_nutritionnelles` sont insérés avec
+#       `ON CONFLICT DO NOTHING` : si la `code_produit` existe déjà, on
+#       n'écrase pas la ligne existante (pas d'update automatique).
+# - Remarques:
+#     - Le script ne met pas à jour les enregistrements existants :
+#       il ignore la ligne si la clé existe. Si vous voulez mettre à jour
+#       les champs existants, il faudra remplacer `ON CONFLICT DO NOTHING`
+#       par un `ON CONFLICT (...) DO UPDATE SET ...` approprié.
+#     - `format_code()` s'assure que les codes issus du CSV (ex: 264.0)
+#       deviennent des chaînes sans décimales; la BDD attend un BIGINT :
+#       SQLAlchemy convertira la chaîne si possible, mais il est plus sûr
+#       de fournir un int pour `code_produit` si vous voulez éviter
+#       warnings/erreurs de typage strict.
+# --------------------------------------------------------------------
+
 # ==============================
 # CONFIGURATION / DEFAULTS
 # ==============================
 
 DEFAULT_DATABASE_URL = "postgresql://postgres:admin@localhost:5432/openfoodfacts_canada"
-DEFAULT_CSV_FILE = "openfoodfacts_clean.csv"
+DEFAULT_CSV_FILE = "dataset_nettoyer.csv"
 
 # ==============================
 # FONCTION UTILITAIREpython database/queries/load_data.py --source data/silver/openfoodfacts_clean.csv
@@ -40,6 +71,21 @@ def get_or_create(conn, table, column, value):
     )
 
     return result.scalar()
+
+
+# --------------------------------------------------
+# Analyse et insertion principale
+# - `main()` lit le CSV, puis pour chaque ligne:
+#   1) récupère/crée la marque (`marque`) via une requête SELECT/INSERT
+#   2) insère la ligne produit dans `produit` (avec `ON CONFLICT DO NOTHING`)
+#   3) insère les valeurs nutritionnelles dans `valeurs_nutritionnelles`
+#   4) éclate les champs listés (categories, ingredients_text, etc.)
+#      et gère les tables N-N (`produit_*`) en évitant les doublons
+#      (via SELECT préalable et `ON CONFLICT DO NOTHING` sur les liens)
+# - `safe()` normalise les valeurs pandas NA → None pour SQLAlchemy.
+# - `format_code()` nettoie les identifiants produits mal typés (ex: 264.0)
+#   pour produire une représentation stable utilisable comme clé.
+# --------------------------------------------------
 
 
 def parse_args():
@@ -81,8 +127,14 @@ def main():
     for _, row in df.iterrows():
         with engine.begin() as conn:
             # -----------------------
+            # -----------------------
             # MARQUE
             # -----------------------
+            # On cherche d'abord la marque existante via `brands` (colonne
+            # `brands` de la table `marque`). Si elle n'existe pas, on
+            # l'insère et on récupère `id_marque`. La colonne `brands`
+            # est définie UNIQUE dans le schéma SQL, donc on évite les
+            # doublons au niveau BDD.
             marque_id = None
             if pd.notna(row.get("brands")):
                 result = conn.execute(
@@ -122,6 +174,11 @@ def main():
             # -----------------------
             # PRODUIT
             # -----------------------
+            # Insertion du produit principal. On mappe les colonnes du CSV
+            # vers les colonnes BDD. IMPORTANT: l'option `ON CONFLICT DO NOTHING`
+            # empêche la création d'un doublon si `code_produit` existe déjà.
+            # Cela signifie aussi qu'on ne mettra pas à jour un produit déjà
+            # présent; on l'ignore.
             conn.execute(text("""
                 INSERT INTO produit (
                     code_produit,
@@ -151,7 +208,7 @@ def main():
                 "grade": safe(row.get("nutriscore_grade")),
                 "score": safe(row.get("nutriscore_score")),
                 "nova": safe(row.get("nova_group")),
-                "url": safe(row.get("product_url")),
+                "url": safe(row.get("url")),
                 "img": safe(row.get("image_url")),
                 "img_s": safe(row.get("image_small_url")),
                 "img_i": safe(row.get("image_ingredients_url")),
@@ -163,6 +220,10 @@ def main():
             # -----------------------
             # VALEURS NUTRITIONNELLES
             # -----------------------
+            # Les valeurs nutritionnelles sont liées 1-1 à `produit` via
+            # `code_produit` (clé primaire dans `valeurs_nutritionnelles` et
+            # référence vers `produit`). Ici aussi on utilise
+            # `ON CONFLICT DO NOTHING` pour éviter les duplications.
             conn.execute(text("""
                 INSERT INTO valeurs_nutritionnelles (
                     code_produit,
@@ -192,8 +253,16 @@ def main():
             # -----------------------
             # LISTES (split)
             # -----------------------
+            # Pour les champs multi-valeurs (séparés par des virgules), on
+            # éclate la chaîne, on normalise chaque valeur, on vérifie si
+            # l'entité existe dans la table de lookup (ex: `ingredient`),
+            # sinon on l'insère, puis on crée la liaison N-N dans la table
+            # d'association (`produit_ingredient`, etc.). Les tables de
+            # lookup ont des contraintes UNIQUE sur leur colonne de nom,
+            # évitant ainsi les duplications.
 
             def insert_many_to_many(field, table, column, link_table, id_column):
+                # Si la colonne est vide/NA, rien à faire
                 if pd.isna(row.get(field)):
                     return
 
@@ -204,6 +273,7 @@ def main():
                     if not v:
                         continue
 
+                    # Vérifier si l'entité existe déjà
                     result = conn.execute(
                         text(f"SELECT {id_column} FROM {table} WHERE {column}=:v"),
                         {"v": v}
@@ -221,19 +291,24 @@ def main():
                             {"v": v}
                         ).scalar()
 
+                    # Insérer la relation N-N (produit <-> entité). Attention
+                    # : on fournit le code produit formaté afin que la clé
+                    # corresponde au type attendu par la table `produit`
+                    # (BIGINT). Si la contrainte PK existe déjà, `ON CONFLICT`
+                    # évitera de créer un doublon.
                     conn.execute(text(f"""
                         INSERT INTO {link_table}
                         VALUES (:code, :id)
                         ON CONFLICT DO NOTHING
                     """), {
-                        "code": row["code"],
+                        "code": format_code(row.get("code")),
                         "id": entity_id
                     })
 
             insert_many_to_many("categories", "categorie", "categorie",
                                 "produit_categorie", "id_categorie")
 
-            insert_many_to_many("ingredients", "ingredient", "ingredients_nom",
+            insert_many_to_many("ingredients_text", "ingredient", "ingredients_nom",
                                 "produit_ingredient", "id_ingredient")
 
             insert_many_to_many("allergens", "allergene", "allergens",
