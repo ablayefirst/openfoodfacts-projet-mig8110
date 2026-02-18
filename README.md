@@ -183,3 +183,37 @@ Le mot de passe ne s’affiche pas dans psql (normal).
 Si les tables sont vides, il faut charger les données via le script load_data.py.
 
 L’application peut fonctionner uniquement en mode DB (pas besoin de CSV si base remplie).
+
+## Démarrage docker
+
+### Prérequis
+- Docker Desktop installé et lancé
+- Git
+
+### Pour les membres de l'équipe (déjà sur le projet)
+
+```bash
+# 1. Aller sur la branche develop (contient tout)
+git checkout develop
+git pull origin develop
+
+# 2. Configurer l'environnement (une seule fois)
+cp .env.example .env
+
+# 3. Lancer l'application
+docker compose up -d
+docker compose ps
+   ```
+# Vérifier que tout tourne
+docker compose ps
+   ```
+
+**C'est tout !** L'application est accessible sur :
+- Airflow : http://localhost:8080 (admin/admin123)
+- MinIO : http://localhost:9001 (minioadmin/minioadmin123)
+- Jupyter : http://localhost:8888 (token: openfood2024)
+- Dash : http://localhost:8050
+
+### En cas de problème
+- Vérifiez que Docker Desktop est bien lancé
+- Regardez les logs : `docker compose logs -f`
