@@ -11,10 +11,12 @@
 
   <div class="header">
     <div class="brand">
-      <div class="logo"></div>
+      <div >
+        <img src="/static/logo/logo_V2.png" alt="Logo" style="width:100px; height:50px;">
+      </div>
       <div>
         <h1>OpenFood</h1>
-        <p>Recherche & exploration de produits alimentaires (OpenFoodFacts)</p>
+        <p style="min-height: auto;">Recherche & exploration & comparaison de produits alimentaires (OpenFoodFacts)</p>
       </div>
     </div>
   </div>
@@ -24,7 +26,7 @@
 
       <div class="searchRow">
         <div class="field">
-          <label>Recherche</label>
+          <label>Recherche par nom</label>
           <input type="text"
                  name="q"
                  placeholder="Ex: Nutella / cacao / biscuits… (tolère les fautes: nutlla)"
@@ -41,21 +43,23 @@
 
         <div class="field">
           <label>Allergène</label>
-
-          <div style="display:flex; gap:10px; align-items:center; margin-bottom:8px;">
-            <input type="checkbox" id="use_allergen" name="use_allergen" value="1"
-                   {% if use_allergen %}checked{% endif %}>
-            <label for="use_allergen" style="margin:0; font-size:13px; color: var(--muted);">
-              Filtrer par allergène
-            </label>
-          </div>
-
           <input type="text"
                  id="allergen"
                  name="allergen"
                  placeholder="Ex: milk, gluten, peanut..."
                  value="{{ allergen if allergen else '' }}"
                  {% if not use_allergen %}disabled{% endif %}>
+        </div> 
+
+        <div class="field">
+          <label for="use_allergen">Cochez pour filtrer par allergène</label> 
+          <input type="checkbox" id="use_allergen" name="use_allergen" value="1"
+                   {% if use_allergen %}checked{% endif %} style=" width: 19px; height: 19px; margin-top: 5%;">
+        </div>
+
+        <div class="field">
+          <label>Mode enfant</label>
+          <input type="checkbox" name="child" value="1" {% if child %}checked{% endif %} style=" width: 19px; height: 19px; margin-top: 5%;">
         </div>
       </div>
 
@@ -100,16 +104,17 @@
 
             <div class="cardInfo">
               <div class="cardTitle">
-                {{ p.product_name if p.product_name else "(Sans nom)" }}
+                {{ p.nom_produit if p.nom_produit else "(Sans nom)" }}
               </div>
 
               <div class="cardMeta">
-                <span class="pill">Marque: {{ p.brands if p.brands else "-" }}</span>
-                <span class="pill mono">Code: {{ p.code }}</span>
+                <span class="pill">Code: {{ p.code }}</span>
               </div>
-
               <div class="cardMeta">
-                <span class="pill">Cat.: {{ p.categories if p.categories else "-" }}</span>
+                <span class="pill">Marque: {{ p.brands if p.brands else "Non renseignée" }}</span>
+              </div>
+              <div class="cardMeta">
+                <span class="pill">Catégorie: {{ p.categories if p.categories else "Non renseignée" }}</span>
               </div>
             </div>
           </div>
@@ -133,7 +138,7 @@
             <div class="cardActions">
               <a class="btn" href="/product/{{ p.code }}">Détails</a>
               <a class="btn btn-ghost" href="https://world.openfoodfacts.org/product/{{ p.code }}" target="_blank">
-                OFF
+                SITE OFFICIEL
               </a>
             </div>
 
