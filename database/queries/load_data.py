@@ -41,7 +41,7 @@ from sqlalchemy import create_engine, text
 # ==============================
 
 DEFAULT_DATABASE_URL = "postgresql://postgres:admin@localhost:5432/openfoodfacts_canada"
-DEFAULT_CSV_FILE = "openfoodfacts_clean.csv"
+DEFAULT_CSV_FILE = "dataset_nettoyer.csv"
 
 # ==============================
 # FONCTION UTILITAIREpython database/queries/load_data.py --source data/silver/openfoodfacts_clean.csv
