@@ -30,10 +30,7 @@ from sqlalchemy import create_engine, text
 #       les champs existants, il faudra remplacer `ON CONFLICT DO NOTHING`
 #       par un `ON CONFLICT (...) DO UPDATE SET ...` approprié.
 #     - `format_code()` s'assure que les codes issus du CSV (ex: 264.0)
-#       deviennent des chaînes sans décimales; la BDD attend un BIGINT :
-#       SQLAlchemy convertira la chaîne si possible, mais il est plus sûr
-#       de fournir un int pour `code_produit` si vous voulez éviter
-#       warnings/erreurs de typage strict.
+#       deviennent des chaînes sans décimales; la BDD attend un TEXT.
 # --------------------------------------------------------------------
 
 # ==============================
@@ -224,9 +221,14 @@ def main():
             # `code_produit` (clé primaire dans `valeurs_nutritionnelles` et
             # référence vers `produit`). Ici aussi on utilise
             # `ON CONFLICT DO NOTHING` pour éviter les duplications.
+            energy_kcal = safe(row.get("energy_kcal_100g"))
+            if energy_kcal is None:
+                energy_kcal = safe(row.get("energy-kcal_100g"))
+
             conn.execute(text("""
                 INSERT INTO valeurs_nutritionnelles (
                     code_produit,
+                    energy_kcal_100g,
                     saturated_fat_100g,
                     sugars_100g,
                     fiber_100g,
@@ -236,11 +238,12 @@ def main():
                     fat_100g
                 )
                 VALUES (
-                    :code, :sat, :sug, :fib, :prot, :salt, :carb, :fat
+                    :code, :kcal, :sat, :sug, :fib, :prot, :salt, :carb, :fat
                 )
                 ON CONFLICT DO NOTHING
             """), {
                 "code": format_code(row.get("code")),
+                "kcal": energy_kcal,
                 "sat": safe(row.get("saturated_fat_100g")),
                 "sug": safe(row.get("sugars_100g")),
                 "fib": safe(row.get("fiber_100g")),
@@ -294,7 +297,7 @@ def main():
                     # Insérer la relation N-N (produit <-> entité). Attention
                     # : on fournit le code produit formaté afin que la clé
                     # corresponde au type attendu par la table `produit`
-                    # (BIGINT). Si la contrainte PK existe déjà, `ON CONFLICT`
+                    # (TEXT). Si la contrainte PK existe déjà, `ON CONFLICT`
                     # évitera de créer un doublon.
                     conn.execute(text(f"""
                         INSERT INTO {link_table}
