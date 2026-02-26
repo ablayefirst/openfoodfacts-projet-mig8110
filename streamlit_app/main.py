@@ -281,11 +281,11 @@ for index, row in df_page.iterrows():
 
         # Bouton de détail à l'intérieur de la carte (sans emoji)
         if st.button("Détails", key=f"detail_{row['code']}"):
-            st.session_state.selected_code = int(row["code"])
+            st.session_state.selected_code = str(row["code"])
             try:
                 st.query_params["code"] = str(row["code"])
             except AttributeError:
-                st.experimental_set_query_params(code=row["code"])
+                st.experimental_set_query_params(code=str(row["code"]))
 
             try:
                 st.switch_page("pages/01_detail_produit.py")
