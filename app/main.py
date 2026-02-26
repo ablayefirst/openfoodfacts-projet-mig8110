@@ -135,9 +135,8 @@ def fmt_num(x) -> str:
 def build_nutrition_rows(p: dict) -> list[dict]:
     rows: list[dict] = []
 
-    # Énergie (si un jour tu l'ajoutes en base, tu pourras compléter ici)
-    kcal = p.get("energy-kcal_100g", "")
-    kj = p.get("energy-kj_100g", "")
+    kcal = p.get("energy_kcal_100g", "")
+    kj = p.get("energy_kj_100g", "")
     kcal_v = fmt_num(kcal)
     kj_v = fmt_num(kj)
     if kcal_v or kj_v:
@@ -150,7 +149,7 @@ def build_nutrition_rows(p: dict) -> list[dict]:
 
     mapping = [
         ("fat_100g", "Matières grasses", "g"),
-        ("saturated-fat_100g", "Dont saturées", "g"),
+        ("saturated_fat_100g", "Dont saturées", "g"),
         ("carbohydrates_100g", "Glucides", "g"),
         ("sugars_100g", "Dont sucres", "g"),
         ("fiber_100g", "Fibres", "g"),
@@ -213,8 +212,9 @@ def product_to_detail_dict(p: Product) -> dict:
 
     # Nutrition
     nutri_dict = {
+        "energy_kcal_100g": p.energy_kcal_100g,
         "fat_100g": p.fat_100g,
-        "saturated-fat_100g": p.saturated_fat_100g,
+        "saturated_fat_100g": p.saturated_fat_100g,
         "carbohydrates_100g": p.carbohydrates_100g,
         "sugars_100g": p.sugars_100g,
         "fiber_100g": p.fiber_100g,
@@ -421,15 +421,12 @@ def search(
 def product_detail(request: Request, code: str):
     """Fiche détail d'un produit par code barre."""
     code = (code or "").strip()
-
-    try:
-        code_int = int(code)
-    except ValueError:
+    if not code:
         return HTMLResponse("Produit introuvable", status_code=404)
 
     db = SessionLocal()
     try:
-        prod = db.query(Product).filter(Product.code_produit == code_int).first()
+        prod = db.query(Product).filter(Product.code_produit == code).first()
         if not prod:
             return HTMLResponse("Produit introuvable", status_code=404)
 
