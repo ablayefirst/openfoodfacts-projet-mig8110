@@ -207,23 +207,25 @@ services:
       postgres:
         condition: service_healthy
 
-  # ---------- DASH (optionnel) ----------
-  dash-app:
+  # ---------- STREAMLIT APP ----------
+  streamlit-app:
     build:
       context: .
-      dockerfile: Dockerfile.dash
-    container_name: dash_openfood
+      dockerfile: Dockerfile
+    container_name: streamlit_openfood
     ports:
-      - "${DASH_APP_PORT}:8050"
+      - "8501:8501"
     environment:
       POSTGRES_HOST: ${POSTGRES_HOST}
       POSTGRES_PORT: ${POSTGRES_PORT}
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_SCHEMA: ${POSTGRES_SCHEMA}
     volumes:
-      - ./dash_app:/app
-    command: python app.py
+      - ./streamlit_app:/app
+    working_dir: /app 
+    command: streamlit run main.py --server.address=0.0.0.0 --server.port=8501
     networks:
       - openfood_network
     depends_on:

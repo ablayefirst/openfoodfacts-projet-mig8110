@@ -29,10 +29,10 @@ if isinstance(query_code, list):
     query_code = query_code[0] if query_code else None
 
 if code is None and query_code is not None:
-    try:
-        code = int(query_code)
+    code = str(query_code).strip()
+    if code:
         st.session_state.selected_code = code
-    except (TypeError, ValueError):
+    else:
         code = None
 
 if code is None:
@@ -51,7 +51,7 @@ if code is None:
         st.error("Aucun produit disponible dans la base.")
         st.stop()
 
-    code = int(fallback_df.iloc[0]["code_produit"])
+    code = str(fallback_df.iloc[0]["code_produit"]).strip()
     st.session_state.selected_code = code
     st.info("Aucun produit sélectionné. Affichage du premier produit disponible.")
 
@@ -61,7 +61,7 @@ if query_code_str != str(code):
     try:
         st.query_params["code"] = str(code)
     except AttributeError:
-        st.experimental_set_query_params(code=code)
+        st.experimental_set_query_params(code=str(code))
 
 # Requête SQL pour tous les détails du produit
 DETAIL_QUERY = """

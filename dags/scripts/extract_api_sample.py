@@ -32,7 +32,7 @@ def parse_args():
     p.add_argument("--sample-size", type=int, default=int(os.getenv("SAMPLE_SIZE", "500")), help="Number of products")
     p.add_argument("--page-size", type=int, default=100, help="API page size (<=100 is safe)")
     p.add_argument("--output", default="/opt/airflow/data/bronze/openfood_sample.jsonl", help="Local output JSONL path")
-    p.add_argument("--sleep", type=float, default=0.2, help="Small delay between pages to be polite")
+    p.add_argument("--sleep", type=float, default=0.8, help="Small delay between pages to be polite")
     return p.parse_args()
 
 def make_session(total_retries: int = 6, backoff: float = 1.0) -> requests.Session:
@@ -89,9 +89,26 @@ def main():
                 "json": 1,
             }
 
+            #r = session.get(search_url, params=params, timeout=(10, 180))
+            #r.raise_for_status()
+            #data = r.json()
+
             r = session.get(search_url, params=params, timeout=(10, 180))
-            r.raise_for_status()
-            data = r.json()
+
+            if r.status_code != 200:
+                print(f"HTTP {r.status_code} from API (page={page}). Retrying after 5s...")
+                # petit extrait pour debug sans spammer
+                print(r.text[:200])
+                time.sleep(5)
+                continue
+
+            try:
+                data = r.json()
+            except Exception as e:
+                print(f"Failed to decode JSON (page={page}): {e}. Retrying after 5s...")
+                time.sleep(5)
+                continue
+
 
             products = data.get("products", [])
             if not products:
@@ -118,6 +135,88 @@ def main():
             print(f"Page {page} done, kept so far: {kept}")
             page += 1
             time.sleep(args.sleep)
+
+    print(f"Done. Wrote {kept} products to {out_path}")
+
+def extract_sample(limit: int = 500, output_dir: str = "/opt/airflow/data", country: str = "canada", **_):
+    """
+    Airflow wrapper (no argparse).
+    """
+    output = os.path.join(output_dir, "bronze", "openfood_sample.jsonl")
+    # On réutilise ta logique en copiant-collant l'essentiel de main(),
+    # ou (moins propre) on force des variables d'env et on appelle main().
+
+    # PROPRE: appelle une version interne qui ne dépend pas de argparse
+    # => le plus simple: remplacer parse_args() par des paramètres.
+    # Ici je te donne le minimum fiable:
+    from pathlib import Path
+
+    out_path = Path(output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    search_url = "https://world.openfoodfacts.org/cgi/search.pl"
+    wanted = limit
+    page_size = 100
+    sleep = 1.0
+
+    kept = 0
+    page = 1
+
+    print(f"API: {search_url}")
+    print(f"Country: {country}, Target sample: {wanted}, Page size: {page_size}")
+    print(f"Output: {out_path}")
+
+    with out_path.open("w", encoding="utf-8") as f_out:
+        session = make_session(total_retries=6, backoff=1.0)
+        while kept < wanted:
+            params = {
+                "search_simple": 1,
+                "action": "process",
+                "tagtype_0": "countries",
+                "tag_contains_0": "contains",
+                "tag_0": country,
+                "page_size": page_size,
+                "page": page,
+                "json": 1,
+            }
+
+            r = session.get(search_url, params=params, timeout=(10, 60))
+
+            if r.status_code != 200:
+                print(f"HTTP {r.status_code} page={page} -> retry in 5s")
+                time.sleep(5)
+                continue
+
+            try:
+                data = r.json()
+            except Exception as e:
+                print(f"JSON decode error page={page}: {e} -> retry in 5s")
+                time.sleep(5)
+                continue
+
+            products = data.get("products", [])
+            if not products:
+                print("No more products returned by API. Stopping.")
+                break
+
+            for prod in products:
+                if not has_country(prod, country):
+                    continue
+                if not not_empty(prod, "code"):
+                    continue
+                if not (not_empty(prod, "product_name") or not_empty(prod, "product_name_fr")):
+                    continue
+                if not (prod.get("categories_tags") or prod.get("categories")):
+                    continue
+
+                f_out.write(json.dumps(prod, ensure_ascii=False) + "\n")
+                kept += 1
+                if kept >= wanted:
+                    break
+
+            print(f"Page {page} done, kept so far: {kept}")
+            page += 1
+            time.sleep(sleep)
 
     print(f"Done. Wrote {kept} products to {out_path}")
 

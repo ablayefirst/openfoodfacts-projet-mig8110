@@ -3,17 +3,15 @@ import psycopg2
 
 
 def get_connection():
-    host = os.getenv("POSTGRES_HOST", "localhost")
-    database = os.getenv("POSTGRES_DB", "openfoodfacts_canada")
-    user = os.getenv("POSTGRES_USER", "postgres")
-    password = os.getenv("POSTGRES_PASSWORD", "admin")
-    port = os.getenv("POSTGRES_PORT", "5432")
-
+    """
+    Returns a PostgreSQL connection using Docker environment variables.
+    Defaults match docker-compose configuration.
+    """
     conn = psycopg2.connect(
-        host=host,
-        database=database,
-        user=user,
-        password=password,
-        port=port,
+        host=os.getenv("POSTGRES_HOST", "postgres"),
+        dbname=os.getenv("POSTGRES_DB", "openfood_db"),
+        user=os.getenv("POSTGRES_USER", "postgres"),
+        password=os.getenv("POSTGRES_PASSWORD", "postgres123"),
+        port=os.getenv("POSTGRES_PORT", "5432"),
     )
     return conn
