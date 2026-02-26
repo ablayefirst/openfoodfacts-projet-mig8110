@@ -1,15 +1,10 @@
 """Définition des modèles SQLAlchemy pour la base OpenFoodFacts."""
 
-# Imports SQLAlchemy : base déclarative, colonnes, relations, fonctions SQL
-from sqlalchemy.orm import declarative_base
-from sqlalchemy import Column, String, Integer, BigInteger, Text
-
 from sqlalchemy.orm import declarative_base, relationship, column_property
 from sqlalchemy import (
-    Column,  # type de base pour toutes les colonnes
+    Column,
     String,
     Integer,
-    BigInteger,
     Text,
     ForeignKey,
     Table,
@@ -26,7 +21,7 @@ Base = declarative_base()
 produit_categorie = Table(
     "produit_categorie",
     Base.metadata,
-    Column("code_produit", BigInteger),
+    Column("code_produit", Text),
     Column("id_categorie", Integer),
     extend_existing=True,
 )
@@ -34,7 +29,7 @@ produit_categorie = Table(
 produit_ingredient = Table(
     "produit_ingredient",
     Base.metadata,
-    Column("code_produit", BigInteger),
+    Column("code_produit", Text),
     Column("id_ingredient", Integer),
     extend_existing=True,
 )
@@ -42,7 +37,7 @@ produit_ingredient = Table(
 produit_allergene = Table(
     "produit_allergene",
     Base.metadata,
-    Column("code_produit", BigInteger),
+    Column("code_produit", Text),
     Column("allergen_id", Integer),
     extend_existing=True,
 )
@@ -79,7 +74,8 @@ class Allergene(Base):
 class ValeursNutritionnelles(Base):
     """Table 1-1 contenant les valeurs nutritionnelles par code produit."""
     __tablename__ = "valeurs_nutritionnelles"
-    code_produit = Column(BigInteger, primary_key=True)
+    code_produit = Column(Text, primary_key=True)
+    energy_kcal_100g = Column(Numeric)
     saturated_fat_100g = Column(Numeric)
     sugars_100g = Column(Numeric)
     fiber_100g = Column(Numeric)
@@ -93,7 +89,7 @@ class ValeursNutritionnelles(Base):
 class Product(Base):
     """Table principale des produits avec liens vers marques, catégories, ingrédients, allergènes."""
     __tablename__ = "produit"
-    code_produit = Column(BigInteger, primary_key=True)
+    code_produit = Column(Text, primary_key=True)
     nom_produit = Column(Text)
     quantite = Column(Text)
     nutrition_grade = Column(String(1))
@@ -137,6 +133,11 @@ class Product(Base):
     )
 
     # Propriétés calculées pour exposer les valeurs nutritionnelles comme si elles étaient des colonnes directes
+    energy_kcal_100g = column_property(
+        select(ValeursNutritionnelles.energy_kcal_100g)
+        .where(ValeursNutritionnelles.code_produit == code_produit)
+        .scalar_subquery()
+    )
     fat_100g = column_property(
         select(ValeursNutritionnelles.fat_100g)
         .where(ValeursNutritionnelles.code_produit == code_produit)
@@ -172,5 +173,4 @@ class Product(Base):
         .where(ValeursNutritionnelles.code_produit == code_produit)
         .scalar_subquery()
     )
-
 
