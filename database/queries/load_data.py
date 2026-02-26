@@ -40,7 +40,7 @@ from sqlalchemy import create_engine, text
 # CONFIGURATION / DEFAULTS
 # ==============================
 
-DEFAULT_DATABASE_URL = "postgresql://postgres:admin@localhost:5432/openfoodfacts_canada"
+DEFAULT_DATABASE_URL = "postgresql://postgres:admin@localhost:5432/openfoodfacts_canada "
 DEFAULT_CSV_FILE = "dataset_nettoyer.csv"
 
 # ==============================

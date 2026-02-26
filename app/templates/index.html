@@ -4,6 +4,24 @@
   <meta charset="utf-8" />
   <title>OpenFood - Catalogue</title>
   <link rel="stylesheet" href="/static/style.css" />
+
+  <!-- ✅ MODIF : liens Admin (connexion / dashboard / logout) -->
+  <div style="text-align:right;margin-top:20px; margin-right:20px;">
+    {% if request.session.get("admin_logged_in") %}
+      <a href="/admin/products" class="btn btn-outline-dark" style="font-weight:bold;">
+        🛠️ Dashboard Admin
+      </a>
+      <a href="/admin/logout" class="btn btn-ghost" style="margin-left:10px;">
+        🚪 Déconnexion
+      </a>
+    {% else %}
+      <a href="/admin/login" class="btn btn-outline-dark" style="font-weight:bold;">
+        🔐 Connexion Admin
+      </a>
+    {% endif %}
+  </div>
+  <!-- ✅ FIN MODIF -->
+
 </head>
 
 <body>
@@ -49,10 +67,10 @@
                  placeholder="Ex: milk, gluten, peanut..."
                  value="{{ allergen if allergen else '' }}"
                  {% if not use_allergen %}disabled{% endif %}>
-        </div> 
+        </div>
 
         <div class="field">
-          <label for="use_allergen">Cochez pour filtrer par allergène</label> 
+          <label for="use_allergen">Cochez pour filtrer par allergène</label>
           <input type="checkbox" id="use_allergen" name="use_allergen" value="1"
                    {% if use_allergen %}checked{% endif %} style=" width: 19px; height: 19px; margin-top: 5%;">
         </div>
