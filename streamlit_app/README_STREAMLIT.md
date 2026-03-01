@@ -157,3 +157,72 @@ Ouvre ce lien dans ton navigateur si celui-ci ne s’ouvre pas automatiquement.
   - Vérifier que la base utilisée (`POSTGRES_DB`) est bien celle qui contient les données OpenFoodFacts
 
 Tu peux adapter ce README si la configuration de ton environnement ou de ta base de données diffère légèrement (autres noms de base, autres utilisateurs, etc.).
+
+
+## 🔐 Module Administration (Streamlit)
+
+Une interface d’administration complète a été intégrée à l’application Streamlit afin de permettre la gestion des produits directement depuis le navigateur.
+
+### ✅ Fonctionnalités disponibles
+
+- Authentification administrateur sécurisée
+- Consultation paginée des produits
+- Recherche par :
+  - Code produit (exact)
+  - Nom
+  - Marque
+  - Catégories
+- Ajout d’un nouveau produit
+- Modification d’un produit existant
+- Suppression sécurisée d’un produit
+- Gestion automatique des relations :
+  - Marque
+  - Catégories (table d’association `produit_categorie`)
+  - Ingrédients (table d’association `produit_ingredient`)
+
+L’administration repose entièrement sur SQLAlchemy ORM et s’intègre proprement à la base PostgreSQL via Docker.
+
+---
+
+### 🔑 Accès Admin
+
+Les identifiants sont définis via variables d’environnement :
+
+
+ADMIN_USER=admin
+ADMIN_PASSWORD=admin123
+
+
+(À modifier en production)
+
+---
+
+### 🛠️ Architecture technique
+
+- **Frontend** : Streamlit
+- **ORM** : SQLAlchemy 2.x
+- **Base de données** : PostgreSQL 16
+- **Driver** : psycopg v3
+- **Déploiement** : Docker Compose
+
+Les modèles ORM sont définis dans `models.py` et utilisent :
+
+- `relationship`
+- `column_property`
+- `tables d’association`
+- `select` et `string_agg` pour les champs calculés
+
+---
+
+### ▶️ Lancement
+
+Après démarrage Docker :
+
+```bash
+docker compose up -d
+
+Accéder à :
+
+http://localhost:8501
+
+Puis sélectionner Admin dans le menu latéral.

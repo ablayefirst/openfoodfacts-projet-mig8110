@@ -8,3 +8,11 @@ __pycache__
 .vscode
 .DS_Store
 app/static/barcodes/*.png
+# Airflow logs (verrouillés sous Windows)
+logs/
+
+# Données volumineuses
+data/
+
+# Notebooks temporaires
+.ipynb_checkpoints/
