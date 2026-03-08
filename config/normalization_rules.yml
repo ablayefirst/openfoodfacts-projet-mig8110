@@ -1,0 +1,41 @@
+ingredients:
+  blacklist_exact:
+    - unknown
+    - unknow
+    - none
+    - null
+    - n/a
+    - ingredients
+    - ingredient
+    - ingredients text
+  blacklist_contains:
+    - may contain
+    - peut contenir
+    - traces de
+  remove_words:
+    - ingredients
+    - ingredient
+    - contains
+  corrections:
+    cyanocobalamine: cyanocobalamin
+    microcristalline cellulose: microcrystalline cellulose
+    xanthan caraghennes gum: xanthan gum
+    calcium d-pantotherate: calcium d-pantothenate
+  standardization:
+    cane sugar: sugar
+    brown sugar: sugar
+    white sugar: sugar
+    soy lecithin: lecithin
+    sunflower lecithin: lecithin
+
+categories:
+  blacklist_exact:
+    - unknown
+    - unknow
+    - none
+    - null
+    - n/a
+  blacklist_contains: []
+  remove_words: []
+  corrections: {}
+  standardization: {}
