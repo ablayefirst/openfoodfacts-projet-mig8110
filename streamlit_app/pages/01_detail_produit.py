@@ -68,6 +68,7 @@ DETAIL_QUERY = """
 SELECT
     p.code_produit AS code,
     p.nom_produit AS product_name,
+    p.categorie_principale,
     p.quantite,
     p.nutrition_grade,
     p.nutriscore_score,
@@ -106,7 +107,7 @@ LEFT JOIN produit_pays pp ON p.code_produit = pp.code_produit
 LEFT JOIN pays ON pp.id_pays = pays.id_pays
 WHERE p.code_produit = %s
 GROUP BY
-    p.code_produit, p.nom_produit, p.quantite,
+    p.code_produit, p.nom_produit, p.categorie_principale, p.quantite,
     p.nutrition_grade, p.nutriscore_score, p.nova_group,
     p.url, p.image_url, p.image_small_url,
     p.image_ingredients_url, p.image_ingredients_small_url,
@@ -144,8 +145,13 @@ with col_img:
         st.markdown(f"[Fiche OpenFoodFacts]({row['url']})")
 
 with col_info:
+    categorie_principale_display = row.get("categorie_principale", "autres")
+    if pd.isna(categorie_principale_display) or str(categorie_principale_display).strip() == "":
+        categorie_principale_display = "autres"
+
     st.markdown(f"**Marque :** {row.get('brand', 'Non spécifiée')}")
     st.markdown(f"**Quantité :** {row.get('quantite', 'Non spécifiée')}")
+    st.markdown(f"**Catégorie principale :** {categorie_principale_display}")
     st.markdown(f"**Catégories :** {row.get('categories', 'Non spécifiée')}")
     st.markdown(f"**Pays :** {row.get('countries', 'Non spécifiés')}")
     st.markdown(f"**NutriScore :** {row.get('nutrition_grade', 'N/A')} (score {row.get('nutriscore_score', 'N/A')})")
