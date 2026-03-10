@@ -46,6 +46,11 @@ DEFAULT_NORMALIZATION_RULES = {
         "corrections": {},
         "standardization": {},
     },
+    "category_primary_mapping": {
+        "default": "autres",
+        "ignore_contains": [],
+        "rules": [],
+    },
 }
 
 OUTPUT_COLUMNS = [
@@ -59,6 +64,7 @@ OUTPUT_COLUMNS = [
     "labels_tags",
     "categories",
     "categories_tags",
+    "categorie_principale",
     "nutriscore_grade",
     "nutriscore_score",
     "nova_group",
@@ -237,6 +243,46 @@ def normalize_rule_section(section: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def normalize_primary_category_rules(section: dict[str, Any]) -> dict[str, Any]:
+    def list_to_canonical(items: Any) -> list[str]:
+        if not isinstance(items, list):
+            return []
+        out = []
+        for item in items:
+            norm = canonicalize_text(item)
+            if norm:
+                out.append(norm)
+        return out
+
+    default_value = clean_text(section.get("default")) if isinstance(section, dict) else None
+    default_value = default_value or "autres"
+    ignore_contains = list_to_canonical(section.get("ignore_contains")) if isinstance(section, dict) else []
+
+    raw_rules = section.get("rules") if isinstance(section, dict) else None
+    normalized_rules: list[dict[str, Any]] = []
+    if isinstance(raw_rules, list):
+        for rule in raw_rules:
+            if not isinstance(rule, dict):
+                continue
+            name = clean_text(rule.get("name"))
+            if not name:
+                continue
+            keywords_raw = rule.get("keywords")
+            if not isinstance(keywords_raw, list):
+                continue
+            keywords = []
+            seen = set()
+            for keyword in keywords_raw:
+                norm = canonicalize_text(keyword)
+                if norm and norm not in seen:
+                    seen.add(norm)
+                    keywords.append(norm)
+            if keywords:
+                normalized_rules.append({"name": name, "keywords": keywords})
+
+    return {"default": default_value, "ignore_contains": ignore_contains, "rules": normalized_rules}
+
+
 def load_normalization_rules() -> tuple[dict[str, Any], str]:
     rules = copy.deepcopy(DEFAULT_NORMALIZATION_RULES)
     source = "defaults"
@@ -257,6 +303,9 @@ def load_normalization_rules() -> tuple[dict[str, Any], str]:
     normalized_rules = {
         "ingredients": normalize_rule_section(rules.get("ingredients", {})),
         "categories": normalize_rule_section(rules.get("categories", {})),
+        "category_primary_mapping": normalize_primary_category_rules(
+            rules.get("category_primary_mapping", {})
+        ),
     }
     return normalized_rules, source
 
@@ -361,6 +410,89 @@ def normalize_categories_fields(
         return categories_text, normalized_fallback
 
     return clean_text(product.get("categories")), []
+
+
+def classify_primary_category(
+    categories_tags: list[str],
+    categories_text: str | None,
+    rules: dict[str, Any],
+    stats: dict[str, int],
+) -> tuple[str, str]:
+    mapping = rules.get("category_primary_mapping", {})
+    mapping_rules = mapping.get("rules", [])
+    ignore_contains = mapping.get("ignore_contains", [])
+    default_value = mapping.get("default") or "autres"
+
+    def sanitize_candidate(value: Any) -> str | None:
+        candidate = canonicalize_text(value)
+        if not candidate:
+            return None
+
+        cleaned = candidate
+        for phrase in ignore_contains:
+            if phrase:
+                cleaned = cleaned.replace(phrase, " ")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if not cleaned:
+            return None
+        return cleaned
+
+    def score_from_candidates(candidates: list[str]) -> tuple[str | None, int]:
+        best_name = None
+        best_score = 0
+        best_index = None
+
+        for idx, rule in enumerate(mapping_rules):
+            rule_name = rule.get("name")
+            keywords = rule.get("keywords", [])
+            if not rule_name or not keywords:
+                continue
+
+            score = 0
+            for candidate in candidates:
+                for keyword in keywords:
+                    if candidate == keyword:
+                        score += 3
+                    elif re.search(rf"\b{re.escape(keyword)}\b", candidate):
+                        score += 2
+                    # Substring fallback is useful for long tokens only; short tokens create noise.
+                    elif len(keyword) >= 4 and keyword in candidate:
+                        score += 1
+
+            if score > best_score:
+                best_name = rule_name
+                best_score = score
+                best_index = idx
+            elif score == best_score and score > 0 and best_index is not None and idx < best_index:
+                best_name = rule_name
+                best_index = idx
+
+        return best_name, best_score
+
+    tag_candidates = []
+    for tag in categories_tags:
+        candidate = sanitize_candidate(tag)
+        if candidate:
+            tag_candidates.append(candidate)
+    matched, matched_score = score_from_candidates(tag_candidates)
+    if matched and matched_score > 0:
+        stats["primary_category_assigned"] += 1
+        stats["primary_category_from_tags"] += 1
+        return matched, "categories_tags"
+
+    fallback_candidates = []
+    for category_value in split_text_values(categories_text, separators=r"[,;|]"):
+        candidate = sanitize_candidate(category_value)
+        if candidate:
+            fallback_candidates.append(candidate)
+    matched, matched_score = score_from_candidates(fallback_candidates)
+    if matched and matched_score > 0:
+        stats["primary_category_assigned"] += 1
+        stats["primary_category_from_categories"] += 1
+        return matched, "categories"
+
+    stats["primary_category_default"] += 1
+    return default_value, "default"
 
 
 def normalize_ingredients_text(
@@ -671,6 +803,7 @@ def build_row(product: dict[str, Any], stats: dict[str, int], rules: dict[str, A
     )
 
     categories_text, categories_tags = normalize_categories_fields(product, rules, stats)
+    categorie_principale, _ = classify_primary_category(categories_tags, categories_text, rules, stats)
     ingredients_text = normalize_ingredients_text(product, rules, stats)
 
     return {
@@ -684,6 +817,7 @@ def build_row(product: dict[str, Any], stats: dict[str, int], rules: dict[str, A
         "labels_tags": normalize_tag_list(product.get("labels_tags")),
         "categories": categories_text,
         "categories_tags": categories_tags,
+        "categorie_principale": categorie_principale,
         "nutriscore_grade": nutriscore_grade,
         "nutriscore_score": nutriscore_score,
         "nova_group": clean_int(product.get("nova_group")),
@@ -749,6 +883,10 @@ def transform_products(products: list[dict[str, Any]], rules: dict[str, Any]) ->
         "quantity_invalid_nonpositive": 0,
         "categories_normalized": 0,
         "ingredients_normalized": 0,
+        "primary_category_assigned": 0,
+        "primary_category_from_tags": 0,
+        "primary_category_from_categories": 0,
+        "primary_category_default": 0,
         "rule_replacements": 0,
         "rule_filtered": 0,
     }
@@ -816,6 +954,10 @@ def run_transform(
         f"nutri_grade_imputed={stats['nutri_grade_imputed']}, nutri_score_imputed={stats['nutri_score_imputed']}, "
         f"quantity_invalid_nonpositive={stats['quantity_invalid_nonpositive']}, "
         f"categories_normalized={stats['categories_normalized']}, ingredients_normalized={stats['ingredients_normalized']}, "
+        f"primary_category_assigned={stats['primary_category_assigned']}, "
+        f"primary_category_from_tags={stats['primary_category_from_tags']}, "
+        f"primary_category_from_categories={stats['primary_category_from_categories']}, "
+        f"primary_category_default={stats['primary_category_default']}, "
         f"rule_replacements={stats['rule_replacements']}, rule_filtered={stats['rule_filtered']}"
     )
     return stats

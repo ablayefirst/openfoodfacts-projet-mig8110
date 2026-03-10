@@ -60,6 +60,30 @@ if "selected_code" not in st.session_state:
 if "home_selection" not in st.session_state:
     st.session_state.home_selection = None
 
+category_options = ["Toutes"]
+try:
+    df_categories = pd.read_sql(
+        """
+        SELECT DISTINCT COALESCE(NULLIF(TRIM(categorie_principale), ''), 'autres') AS categorie_principale
+        FROM produit
+        ORDER BY 1
+        """,
+        conn,
+    )
+    if not df_categories.empty:
+        values = (
+            df_categories["categorie_principale"]
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .loc[lambda s: s != ""]
+            .unique()
+            .tolist()
+        )
+        category_options.extend(values)
+except Exception:
+    pass
+
 # ==============================
 #  BARRE DE RECHERCHE
 # ==============================
@@ -70,7 +94,11 @@ with col1:
     search_name = st.text_input("Rechercher par nom")
 
 with col2:
-    category_filter = st.text_input("Filtrer par catégorie")
+    selected_main_category = st.selectbox(
+        "Catégorie principale (exacte)",
+        options=category_options,
+        index=0,
+    )
 
 with col3:
     max_sugar = st.number_input("Sucre max (g/100g)", min_value=0.0, value=50.0)
@@ -103,6 +131,8 @@ with col6:
         horizontal=True,
     )
 
+category_detail_filter = st.text_input("Recherche libre dans catégories détaillées (optionnel)")
+
 # ==============================
 #  REQUÊTE SQL DYNAMIQUE
 # ==============================
@@ -110,6 +140,7 @@ with col6:
 query = """
 SELECT p.code_produit AS code,
        p.nom_produit AS product_name,
+       p.categorie_principale,
        p.nutrition_grade AS nutriscore_grade,
        p.nova_group,
     p.image_url,
@@ -123,26 +154,44 @@ FROM produit p
 JOIN valeurs_nutritionnelles v ON p.code_produit = v.code_produit
 LEFT JOIN produit_categorie pc ON p.code_produit = pc.code_produit
 LEFT JOIN categorie c ON pc.id_categorie = c.id_categorie
-WHERE 1=1
+	WHERE 1=1
 """
 
-if search_name:
-	query += f" AND LOWER(p.nom_produit) LIKE LOWER('%{search_name}%')"
+query_params = {"max_sugar": float(max_sugar)}
 
-if category_filter:
-	query += f" AND LOWER(c.categorie) LIKE LOWER('%{category_filter}%')"
+if search_name:
+    query += " AND LOWER(p.nom_produit) LIKE LOWER(%(search_name)s)"
+    query_params["search_name"] = f"%{search_name}%"
+
+if selected_main_category != "Toutes":
+    query += """
+    AND LOWER(COALESCE(NULLIF(TRIM(p.categorie_principale), ''), 'autres')) = LOWER(%(category_exact)s)
+    """
+    query_params["category_exact"] = selected_main_category
+
+if category_detail_filter:
+    query += """
+    AND EXISTS (
+        SELECT 1
+        FROM produit_categorie pc2
+        JOIN categorie c2 ON pc2.id_categorie = c2.id_categorie
+        WHERE pc2.code_produit = p.code_produit
+          AND LOWER(c2.categorie) LIKE LOWER(%(category_detail_filter)s)
+    )
+    """
+    query_params["category_detail_filter"] = f"%{category_detail_filter}%"
 
 # Filtre sucre
-query += f" AND v.sugars_100g <= {max_sugar}"
+query += " AND v.sugars_100g <= %(max_sugar)s"
 
-query += "\nGROUP BY p.code_produit, p.nom_produit, p.nutrition_grade, p.nova_group, v.sugars_100g, v.salt_100g, v.saturated_fat_100g, v.fiber_100g, v.proteins_100g"
+query += "\nGROUP BY p.code_produit, p.nom_produit, p.categorie_principale, p.nutrition_grade, p.nova_group, v.sugars_100g, v.salt_100g, v.saturated_fat_100g, v.fiber_100g, v.proteins_100g"
 
 warnings.filterwarnings(
     "ignore",
     message="pandas only supports SQLAlchemy connectable",
     category=UserWarning,
 )
-df = pd.read_sql(query, conn)
+df = pd.read_sql(query, conn, params=query_params)
 
 df["sugars_clean"] = clean_nutrient_series(df["sugars_100g"], 50.0)
 df["salt_clean"] = clean_nutrient_series(df["salt_100g"], 25.0)
@@ -175,7 +224,8 @@ elif sort_option == "Sel (g/100g)":
 # Vue d'accueil par défaut ? (aucune recherche, aucun filtre, sucre par défaut)
 is_home = (
     (not search_name)
-    and (not category_filter)
+    and (selected_main_category == "Toutes")
+    and (not category_detail_filter)
     and max_sugar == 50.0
 )
 
@@ -249,6 +299,10 @@ for index, row in df_page.iterrows():
         badge_html = "<span style=\"background-color:#0f9d58; color:white; padding:2px 8px; border-radius:12px; font-size:12px; margin-left:6px;\">Top choix</span>"
 
     with col:
+        categorie_principale_display = row.get("categorie_principale", "autres")
+        if pd.isna(categorie_principale_display) or str(categorie_principale_display).strip() == "":
+            categorie_principale_display = "autres"
+
         st.markdown(
             f"""
             <div style="
@@ -269,7 +323,8 @@ for index, row in df_page.iterrows():
                 <div style="flex:1 1 60%; max-width:60%; overflow:hidden;">
                     <h4 style="margin-top:0; margin-bottom:8px; word-wrap:break-word; display:flex; align-items:center; gap:6px;">
                         <span>{row['product_name']}</span>{badge_html}</h4>   
-                    <p style="margin:2px 0;"><b>Catégorie:</b> {categories_display}</p>
+                    <p style="margin:2px 0;"><b>Catégorie principale:</b> {categorie_principale_display}</p>
+                    <p style="margin:2px 0;"><b>Catégories détaillées:</b> {categories_display}</p>
                     <p style="margin:2px 0;"><b>NutriScore:</b> {row['nutriscore_grade'] or 'N/A'}</p>
                     <p style="margin:2px 0;">Sucre: {format_grams(clean_nutrient_value(row['sugars_100g'], 50.0))}</p>
                     <p style="margin:2px 0;">Sel: {format_grams(clean_nutrient_value(row['salt_100g'], 25.0))}</p>

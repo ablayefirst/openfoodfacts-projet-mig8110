@@ -367,6 +367,7 @@ def upsert_product(cur, row: pd.Series, marque_id):
             code_produit,
             nom_produit,
             quantite,
+            categorie_principale,
             nutrition_grade,
             nutriscore_score,
             nova_group,
@@ -378,10 +379,11 @@ def upsert_product(cur, row: pd.Series, marque_id):
             image_nutrition_url,
             id_marque
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (code_produit) DO UPDATE SET
             nom_produit = COALESCE(EXCLUDED.nom_produit, produit.nom_produit),
             quantite = COALESCE(EXCLUDED.quantite, produit.quantite),
+            categorie_principale = COALESCE(EXCLUDED.categorie_principale, produit.categorie_principale),
             nutrition_grade = COALESCE(EXCLUDED.nutrition_grade, produit.nutrition_grade),
             nutriscore_score = COALESCE(EXCLUDED.nutriscore_score, produit.nutriscore_score),
             nova_group = COALESCE(EXCLUDED.nova_group, produit.nova_group),
@@ -397,6 +399,7 @@ def upsert_product(cur, row: pd.Series, marque_id):
             normalize_code(row.get("code")),
             clean_text(row.get("product_name")),
             derive_quantity_text(row),
+            clean_text(row.get("categorie_principale")),
             normalize_nutrition_grade(row.get("nutriscore_grade")),
             clean_int(row.get("nutriscore_score")),
             clean_int(row.get("nova_group")),
