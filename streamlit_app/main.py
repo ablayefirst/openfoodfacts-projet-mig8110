@@ -1,10 +1,12 @@
 import os
 import random
+import warnings
 
 import streamlit as st
 import pandas as pd
-import warnings
+
 from db_connection import get_connection
+from admin import run_admin
 
 
 def clean_nutrient_series(series: pd.Series, max_reasonable: float) -> pd.Series:
@@ -37,7 +39,21 @@ def shorten_text(text: str, max_length: int = 30) -> str:
         return text
     return text[: max_length - 1] + "…"
 
+
 st.set_page_config(page_title="Santé & Nutrition", layout="wide")
+
+# ===== MENU SIDEBAR =====
+st.sidebar.title("Menu")
+page = st.sidebar.radio("Aller à", ["Dashboard", "Admin"])
+
+# Si admin -> on exécute admin et on stop ici (sinon le dashboard s'affiche aussi)
+if page == "Admin":
+    run_admin()
+    st.stop()
+
+# ==============================
+#  DASHBOARD (TON CODE ORIGINAL)
+# ==============================
 
 # Titre avec logo sur la même ligne
 title_col1, title_col2 = st.columns([0.15, 0.85])
@@ -143,7 +159,7 @@ SELECT p.code_produit AS code,
        p.categorie_principale,
        p.nutrition_grade AS nutriscore_grade,
        p.nova_group,
-    p.image_url,
+       p.image_url,
        v.sugars_100g,
        v.salt_100g,
        v.saturated_fat_100g,
@@ -157,34 +173,16 @@ LEFT JOIN categorie c ON pc.id_categorie = c.id_categorie
 	WHERE 1=1
 """
 
-query_params = {"max_sugar": float(max_sugar)}
-
 if search_name:
-    query += " AND LOWER(p.nom_produit) LIKE LOWER(%(search_name)s)"
-    query_params["search_name"] = f"%{search_name}%"
+    query += f" AND LOWER(p.nom_produit) LIKE LOWER('%{search_name}%')"
 
-if selected_main_category != "Toutes":
-    query += """
-    AND LOWER(COALESCE(NULLIF(TRIM(p.categorie_principale), ''), 'autres')) = LOWER(%(category_exact)s)
-    """
-    query_params["category_exact"] = selected_main_category
-
-if category_detail_filter:
-    query += """
-    AND EXISTS (
-        SELECT 1
-        FROM produit_categorie pc2
-        JOIN categorie c2 ON pc2.id_categorie = c2.id_categorie
-        WHERE pc2.code_produit = p.code_produit
-          AND LOWER(c2.categorie) LIKE LOWER(%(category_detail_filter)s)
-    )
-    """
-    query_params["category_detail_filter"] = f"%{category_detail_filter}%"
+if category_filter:
+    query += f" AND LOWER(c.categorie) LIKE LOWER('%{category_filter}%')"
 
 # Filtre sucre
 query += " AND v.sugars_100g <= %(max_sugar)s"
 
-query += "\nGROUP BY p.code_produit, p.nom_produit, p.categorie_principale, p.nutrition_grade, p.nova_group, v.sugars_100g, v.salt_100g, v.saturated_fat_100g, v.fiber_100g, v.proteins_100g"
+query += "\nGROUP BY p.code_produit, p.nom_produit, p.nutrition_grade, p.nova_group, p.image_url, v.sugars_100g, v.salt_100g, v.saturated_fat_100g, v.fiber_100g, v.proteins_100g"
 
 warnings.filterwarnings(
     "ignore",
@@ -241,7 +239,10 @@ if is_home:
             needed = max(0, 10 - len(df_with_img))
             extras = pd.DataFrame()
             if needed > 0 and len(df_without_img) > 0:
-                extras = df_without_img.sample(min(needed, len(df_without_img)), random_state=random.randint(0, 1_000_000))
+                extras = df_without_img.sample(
+                    min(needed, len(df_without_img)),
+                    random_state=random.randint(0, 1_000_000),
+                )
             selection = pd.concat([df_with_img, extras]).head(10)
 
         st.session_state.home_selection = selection.reset_index(drop=True)
@@ -271,15 +272,13 @@ else:
 
 st.subheader(f"Résultats ({len(df)} produits trouvés)")
 
-
-
 # 2 cartes par ligne
 cols = st.columns(2)
 
 for index, row in df_page.iterrows():
     col = cols[index % 2]
 
-    # Limiter le nombre de catégories affichées (max 5)
+    # Limiter le nombre de catégories affichées (max 3)
     categories_display = row.get("categories", "Non spécifiée")
     if pd.notna(categories_display) and categories_display != "Non spécifiée":
         cats_list = [shorten_text(c.strip()) for c in str(categories_display).split(",") if c.strip()]
@@ -334,7 +333,7 @@ for index, row in df_page.iterrows():
             unsafe_allow_html=True
         )
 
-        # Bouton de détail à l'intérieur de la carte (sans emoji)
+        # Bouton de détail à l'intérieur de la carte
         if st.button("Détails", key=f"detail_{row['code']}"):
             st.session_state.selected_code = str(row["code"])
             try:
@@ -352,7 +351,7 @@ for index, row in df_page.iterrows():
 # ==============================
 
 if not is_home:
-    col1, col2, col3 = st.columns([1,2,1])
+    col1, col2, col3 = st.columns([1, 2, 1])
 
     with col1:
         if st.button("⬅️ Page précédente") and st.session_state.page > 1:
@@ -363,3 +362,9 @@ if not is_home:
             st.session_state.page += 1
 
     st.write(f"Page {st.session_state.page} / {total_pages}")
+
+# (Optionnel mais propre) : fermer la connexion
+try:
+    conn.close()
+except Exception:
+    pass

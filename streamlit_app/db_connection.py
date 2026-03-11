@@ -1,17 +1,34 @@
 import os
-import psycopg2
+import psycopg
+from psycopg import OperationalError
 
 
 def get_connection():
     """
-    Returns a PostgreSQL connection using Docker environment variables.
-    Defaults match docker-compose configuration.
+    Create and return a PostgreSQL connection using environment variables.
+    Designed for Docker environment (streamlit + postgres service).
     """
-    conn = psycopg2.connect(
-        host=os.getenv("POSTGRES_HOST", "postgres"),
-        dbname=os.getenv("POSTGRES_DB", "openfood_db"),
-        user=os.getenv("POSTGRES_USER", "postgres"),
-        password=os.getenv("POSTGRES_PASSWORD", "postgres123"),
-        port=os.getenv("POSTGRES_PORT", "5432"),
-    )
-    return conn
+
+    # Read environment variables
+    host = os.getenv("POSTGRES_HOST", "postgres")
+    dbname = os.getenv("POSTGRES_DB", "openfood_db")
+    user = os.getenv("POSTGRES_USER", "postgres")
+    password = os.getenv("POSTGRES_PASSWORD", "postgres123")
+    port = os.getenv("POSTGRES_PORT", "5432")
+
+    try:
+        connection = psycopg.connect(
+            host=host,
+            dbname=dbname,
+            user=user,
+            password=password,
+            port=port,
+        )
+
+        print("✅ Database connection successful.")
+        return connection
+
+    except OperationalError as error:
+        print("❌ Failed to connect to PostgreSQL.")
+        print(f"Details: {error}")
+        raise

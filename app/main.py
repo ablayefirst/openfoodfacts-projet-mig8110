@@ -2,7 +2,10 @@
 # Fichier principal de l'application FastAPI pour OpenFoodFacts
 # Version propre : 100% base PostgreSQL, sans CSV/pandas.
 ###############################################################
-
+import os
+from fastapi import Form
+from fastapi.responses import RedirectResponse
+from starlette.middleware.sessions import SessionMiddleware
 from pathlib import Path
 import re
 
@@ -11,21 +14,36 @@ from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-
+from starlette.status import HTTP_303_SEE_OTHER
 from barcode import EAN13, Code128
 from barcode.writer import ImageWriter
-
-from sqlalchemy import or_, case, func
-
+from sqlalchemy.orm import Session
+from sqlalchemy import or_, func
+from sqlalchemy import cast, String
 from app.db import SessionLocal
-from app.models import Product
+from app.models import (
+    Product,
+    Marque,
+    Categorie,
+    Ingredient,
+    produit_categorie,
+    produit_ingredient,
+)
 
 
 # =========================
 # Initialisation FastAPI & templates
 # =========================
 app = FastAPI()
-
+# =========================
+# Sessions (login admin)
+# =========================
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.getenv("SESSION_SECRET", "dev-secret-change-me"),
+    same_site="lax",
+    https_only=False,  # mets True si tu es en HTTPS
+)
 templates = Jinja2Templates(directory="app/templates")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
@@ -433,5 +451,446 @@ def product_detail(request: Request, code: str):
         p = product_to_detail_dict(prod)
 
         return templates.TemplateResponse("product.html", {"request": request, "p": p})
+    finally:
+        db.close()
+# =========================
+# Admin helpers
+# =========================
+
+# ✅ AJOUT IMPORTS MANQUANTS (obligatoires)
+from sqlalchemy import select, delete, insert
+from starlette import status
+
+
+def _split_csv(txt: str) -> list[str]:
+    if not txt:
+        return []
+    parts = [p.strip() for p in txt.replace("|", ",").split(",")]
+    return [p for p in parts if p]
+
+
+def _get_or_create_marque(db: Session, marque_nom: str | None) -> Marque | None:
+    if not marque_nom:
+        return None
+    name = marque_nom.strip()
+    if not name:
+        return None
+
+    # ✅ si doublons => on prend la première ligne (la plus petite id)
+    obj = (
+        db.execute(
+            select(Marque)
+            .where(func.lower(Marque.brands) == name.lower())
+            .order_by(Marque.id_marque.asc())
+        )
+        .scalars()
+        .first()
+    )
+    if obj:
+        return obj
+
+    obj = Marque(brands=name)
+    db.add(obj)
+    db.flush()
+    return obj
+
+
+def _get_or_create_categories(db: Session, categories_txt: str | None) -> list[Categorie]:
+    items = _split_csv(categories_txt or "")
+    if not items:
+        return []
+    out: list[Categorie] = []
+    for c in items:
+        obj = (
+            db.execute(
+                select(Categorie)
+                .where(func.lower(Categorie.categorie) == c.lower())
+                .order_by(Categorie.id_categorie.asc())
+            )
+            .scalars()
+            .first()
+        )
+        if not obj:
+            obj = Categorie(categorie=c)
+            db.add(obj)
+            db.flush()
+        out.append(obj)
+    return out
+
+
+def _get_or_create_ingredients(db: Session, ingredients_txt: str | None) -> list[Ingredient]:
+    items = _split_csv(ingredients_txt or "")
+    if not items:
+        return []
+    out: list[Ingredient] = []
+    for i in items:
+        obj = (
+            db.execute(
+                select(Ingredient)
+                .where(func.lower(Ingredient.ingredients_nom) == i.lower())
+                .order_by(Ingredient.id_ingredient.asc())
+            )
+            .scalars()
+            .first()
+        )
+        if not obj:
+            obj = Ingredient(ingredients_nom=i)
+            db.add(obj)
+            db.flush()
+        out.append(obj)
+    return out
+
+
+def _replace_product_categories(db: Session, code_produit: int, categories: list[Categorie]) -> None:
+    db.execute(
+        delete(produit_categorie).where(produit_categorie.c.code_produit == code_produit)
+    )
+    if categories:
+        db.execute(
+            insert(produit_categorie),
+            [{"code_produit": code_produit, "id_categorie": c.id_categorie} for c in categories],
+        )
+
+
+def _replace_product_ingredients(db: Session, code_produit: int, ingredients: list[Ingredient]) -> None:
+    db.execute(
+        delete(produit_ingredient).where(produit_ingredient.c.code_produit == code_produit)
+    )
+    if ingredients:
+        db.execute(
+            insert(produit_ingredient),
+            [{"code_produit": code_produit, "id_ingredient": i.id_ingredient} for i in ingredients],
+        )
+
+
+def admin_required(request: Request):
+    """Si pas connecté admin -> redirection /admin/login"""
+    if not request.session.get("admin_ok"):
+        return RedirectResponse(url="/admin/login", status_code=status.HTTP_303_SEE_OTHER)
+    return None
+
+
+# ⚠️ IMPORTANT: tu avais 2 fonctions admin_logout.
+# On garde UNE seule version: /admin/logout
+@app.get("/admin/logout")
+def admin_logout(request: Request):
+    request.session.pop("admin_ok", None)
+    return RedirectResponse(url="/admin/login", status_code=status.HTTP_303_SEE_OTHER)
+
+
+# =========================
+# Admin routes
+# =========================
+
+@app.get("/admin/login", response_class=HTMLResponse)
+def admin_login_get(request: Request):
+    return templates.TemplateResponse(
+        "admin/login.html",
+        {"request": request, "error": ""},
+    )
+
+
+@app.post("/admin/login", response_class=HTMLResponse)
+def admin_login_post(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+):
+    admin_user = os.getenv("ADMIN_USER", "admin")
+    admin_pass = os.getenv("ADMIN_PASSWORD", "admin123")
+
+    if username == admin_user and password == admin_pass:
+        request.session["admin_ok"] = True
+        return RedirectResponse(url="/admin/products", status_code=status.HTTP_303_SEE_OTHER)
+
+    return templates.TemplateResponse(
+        "admin/login.html",
+        {"request": request, "error": "Identifiants invalides."},
+        status_code=401,
+    )
+
+
+@app.get("/admin/products", response_class=HTMLResponse)
+def admin_products(
+    request: Request,
+    q: str = "",
+    page: int = Query(1, ge=1),
+):
+    # 🔒 protection admin
+    redir = admin_required(request)
+    if redir:
+        return redir
+
+    db = SessionLocal()
+    try:
+        per_page = 25
+        qn = (q or "").strip()
+
+        query_db = db.query(Product)
+
+        # --- FILTRE RECHERCHE ---
+        if qn:
+            like = f"%{qn}%"
+
+            # ✅ Si l'utilisateur tape un nombre => recherche prioritaire par code exact
+            if qn.isdigit():
+                code_int = int(qn)
+                query_db = query_db.filter(Product.code_produit == code_int)
+                query_db = query_db.order_by(Product.code_produit.desc())
+            else:
+                # ✅ Recherche texte sur champs principaux + code en texte
+                query_db = query_db.filter(
+                    or_(
+                        Product.nom_produit.ilike(like),
+                        Product.brands.ilike(like),
+                        Product.categories.ilike(like),
+                        cast(Product.code_produit, String).ilike(like),
+                    )
+                )
+                query_db = query_db.order_by(Product.nom_produit.asc().nulls_last())
+        else:
+            query_db = query_db.order_by(Product.code_produit.desc())
+
+        # --- PAGINATION ---
+        total = query_db.count()
+        total_pages = max(1, (total + per_page - 1) // per_page)
+        if page > total_pages:
+            page = total_pages
+
+        products = (
+            query_db
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+            .all()
+        )
+
+        return templates.TemplateResponse(
+            "admin/products.html",
+            {
+                "request": request,
+                "products": products,
+                "q": q,
+                "page": page,
+                "total_pages": total_pages,
+                "total": total,
+            },
+        )
+    finally:
+        db.close()
+
+
+@app.get("/admin/product/new")
+def admin_product_new_get(request: Request):
+    redir = admin_required(request)
+    if redir:
+        return redir
+
+    return templates.TemplateResponse(
+        "admin/product_form.html",
+        {
+            "request": request,
+            "title": "Ajouter un produit",
+            "action": "/admin/product/new",
+            "p": None,
+            "is_edit": False,
+            "error": "",
+        },
+    )
+
+
+@app.post("/admin/product/new")
+def admin_product_new_post(
+    request: Request,
+    code_produit: str = Form(...),
+    nom_produit: str = Form(...),
+    nutrition_grade: str = Form(None),
+    nutriscore_score: str = Form(None),
+
+    marque_nom: str = Form(None),
+    categories_txt: str = Form(None),
+    ingredients_txt: str = Form(None),
+):
+    redir = admin_required(request)
+    if redir:
+        return redir
+
+    db = SessionLocal()
+    try:
+        code_int = int(code_produit.strip())
+
+        existing = db.get(Product, code_int)
+        if existing:
+            return templates.TemplateResponse(
+                "admin/product_form.html",
+                {
+                    "request": request,
+                    "title": "Ajouter un produit",
+                    "action": "/admin/product/new",
+                    "p": None,
+                    "is_edit": False,
+                    "error": "Ce code produit existe déjà.",
+                },
+            )
+
+        p = Product(
+            code_produit=code_int,
+            nom_produit=nom_produit.strip(),
+            nutrition_grade=(nutrition_grade.strip() if nutrition_grade else None),
+            nutriscore_score=(int(nutriscore_score) if nutriscore_score not in (None, "", "None") else None),
+        )
+
+        # marque => Marque.brands
+        m = _get_or_create_marque(db, marque_nom)
+        p.id_marque = (m.id_marque if m else None)
+
+        db.add(p)
+        db.flush()
+
+        # catégories / ingrédients via tables d'association
+        cats = _get_or_create_categories(db, categories_txt)
+        ings = _get_or_create_ingredients(db, ingredients_txt)
+
+        _replace_product_categories(db, p.code_produit, cats)
+        _replace_product_ingredients(db, p.code_produit, ings)
+
+        db.commit()
+        return RedirectResponse(url="/admin/products", status_code=status.HTTP_303_SEE_OTHER)
+
+    except Exception as e:
+        db.rollback()
+        return templates.TemplateResponse(
+            "admin/product_form.html",
+            {
+                "request": request,
+                "title": "Ajouter un produit",
+                "action": "/admin/product/new",
+                "p": None,
+                "is_edit": False,
+                "error": f"Erreur enregistrement: {e}",
+            },
+        )
+    finally:
+        db.close()
+
+
+@app.get("/admin/product/{code}/edit", response_class=HTMLResponse)
+def admin_product_edit_get(request: Request, code: str):
+    redir = admin_required(request)
+    if redir:
+        return redir
+
+    try:
+        code_int = int((code or "").strip())
+    except ValueError:
+        return HTMLResponse("Code invalide", status_code=400)
+
+    db = SessionLocal()
+    try:
+        p = db.query(Product).filter(Product.code_produit == code_int).first()
+        if not p:
+            return HTMLResponse("Produit introuvable", status_code=404)
+
+        return templates.TemplateResponse(
+            "admin/product_form.html",
+            {
+                "request": request,
+                "title": f"Modifier produit {code_int}",
+                "action": f"/admin/product/{code_int}/edit",
+                "p": p,
+                "is_edit": True,
+                "error": "",
+            },
+        )
+    finally:
+        db.close()
+
+
+@app.post("/admin/product/{code}/edit")
+def admin_product_edit_post(
+    code: int,
+    request: Request,
+    nom_produit: str = Form(...),
+
+    marque_nom: str = Form(""),
+    categories_txt: str = Form(""),
+    ingredients_txt: str = Form(""),
+
+    nutrition_grade: str = Form(""),
+    nutriscore_score: str = Form(None),
+):
+    redir = admin_required(request)
+    if redir:
+        return redir
+
+    db: Session = SessionLocal()
+    p = None
+    try:
+        p = db.query(Product).filter(Product.code_produit == int(code)).first()
+        if not p:
+            return RedirectResponse(url="/admin/products", status_code=303)
+
+        # ✅ champs simples
+        p.nom_produit = (nom_produit or "").strip()
+        p.nutrition_grade = (nutrition_grade or "").strip() or None
+        p.nutriscore_score = (int(nutriscore_score) if nutriscore_score not in (None, "", "None") else None)
+
+        # ✅ marque : ton modèle = Marque.brands
+        m = _get_or_create_marque(db, marque_nom)
+        p.id_marque = (m.id_marque if m else None)
+
+        db.flush()
+
+        # ✅ catégories / ingrédients : tables d'association
+        cats = _get_or_create_categories(db, categories_txt)
+        ings = _get_or_create_ingredients(db, ingredients_txt)
+
+        _replace_product_categories(db, p.code_produit, cats)
+        _replace_product_ingredients(db, p.code_produit, ings)
+
+        db.commit()
+        return RedirectResponse(url="/admin/products", status_code=303)
+
+    except Exception as e:
+        db.rollback()
+        return templates.TemplateResponse(
+            "admin/product_form.html",
+            {
+                "request": request,
+                "title": "Modifier un produit",
+                "action": f"/admin/product/{code}/edit",
+                "p": p,
+                "is_edit": True,
+                "error": f"Erreur modification: {e}",
+            },
+        )
+    finally:
+        db.close()
+
+
+@app.post("/admin/product/{code}/delete")
+def admin_product_delete(request: Request, code: str):
+    redir = admin_required(request)
+    if redir:
+        return redir
+
+    try:
+        code_int = int((code or "").strip())
+    except ValueError:
+        return HTMLResponse("Code invalide", status_code=400)
+
+    db = SessionLocal()
+    try:
+        p = db.query(Product).filter(Product.code_produit == code_int).first()
+        if not p:
+            return RedirectResponse(url="/admin/products", status_code=303)
+
+        # ⚠️ conseillé: nettoyer les associations avant delete
+        db.execute(delete(produit_categorie).where(produit_categorie.c.code_produit == code_int))
+        db.execute(delete(produit_ingredient).where(produit_ingredient.c.code_produit == code_int))
+
+        db.delete(p)
+        db.commit()
+
+        return RedirectResponse(url="/admin/products", status_code=303)
     finally:
         db.close()
