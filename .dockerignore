@@ -1,0 +1,13 @@
+﻿.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.git
+.gitignore
+.vscode
+.DS_Store
+app/static/barcodes/*.png
+logs/
+*.log
+.env

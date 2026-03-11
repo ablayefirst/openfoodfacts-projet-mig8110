@@ -24,4 +24,13 @@ tqdm>=4.66.0
 matplotlib>=3.7.0
 seaborn>=0.12.0
 jupyter>=1.0.0          # Pour les notebooks
+<<<<<<< Updated upstream:requirement.txt
 ipykernel>=6.0.0        # Pour les notebooks 
+=======
+ipykernel>=6.0.0        # Pour les notebooks 
+jinja2>=3.1.0
+requests>=2.31.0
+python-barcode>=0.15.1
+pillow>=10.0.0
+plotly
+>>>>>>> Stashed changes:requirements.txt
