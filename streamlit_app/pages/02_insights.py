@@ -25,7 +25,7 @@ with col1:
     )
 
 with col2:
-    category_filter = st.text_input("Filtrer catégorie (texte)")
+    category_filter = st.text_input("Filtrer catégorie principale (texte)")
 
 params = {}
 filters_sql = ""
@@ -35,15 +35,7 @@ if nutriscore_filter:
     params["nutriscores"] = nutriscore_filter
 
 if category_filter:
-    filters_sql += """
-    AND EXISTS (
-        SELECT 1
-        FROM produit_categorie pc2
-        JOIN categorie c2 ON pc2.id_categorie = c2.id_categorie
-        WHERE pc2.code_produit = p.code_produit
-          AND LOWER(c2.categorie) LIKE LOWER(%(cat_filter)s)
-    )
-    """
+    filters_sql += " AND LOWER(COALESCE(p.categorie_principale, '')) LIKE LOWER(%(cat_filter)s)"
     params["cat_filter"] = f"%{category_filter}%"
 
 # =====================================
@@ -69,11 +61,9 @@ df_nutri = run_query(sql_nutriscore, params)
 
 sql_top_categories = f"""
 SELECT
-  COALESCE(c.categorie, 'Non spécifiée') AS categorie,
+  COALESCE(NULLIF(TRIM(p.categorie_principale), ''), 'autres') AS categorie,
   COUNT(DISTINCT p.code_produit)::int AS n_produits
 FROM produit p
-LEFT JOIN produit_categorie pc ON p.code_produit = pc.code_produit
-LEFT JOIN categorie c ON pc.id_categorie = c.id_categorie
 WHERE 1=1
 {filters_sql}
 GROUP BY 1
@@ -89,12 +79,10 @@ df_cat_count = run_query(sql_top_categories, params)
 
 sql_cat_sugar = f"""
 SELECT
-  COALESCE(c.categorie, 'Non spécifiée') AS categorie,
+  COALESCE(NULLIF(TRIM(p.categorie_principale), ''), 'autres') AS categorie,
   AVG(v.sugars_100g) AS avg_sugars_100g
 FROM produit p
 JOIN valeurs_nutritionnelles v ON p.code_produit = v.code_produit
-LEFT JOIN produit_categorie pc ON p.code_produit = pc.code_produit
-LEFT JOIN categorie c ON pc.id_categorie = c.id_categorie
 WHERE v.sugars_100g IS NOT NULL
   AND v.sugars_100g BETWEEN 0 AND 50
   {filters_sql}

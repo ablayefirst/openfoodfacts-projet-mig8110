@@ -63,6 +63,7 @@ CREATE TABLE produit (
 
     nom_produit TEXT NOT NULL,
     quantite TEXT,
+    categorie_principale TEXT,
 
     nutrition_grade CHAR(1),
     nutriscore_score INTEGER,
