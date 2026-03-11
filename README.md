@@ -1,11 +1,9 @@
 # OpenFoodFacts Data Platform (MIG8110)
 
-Projet de plateforme data base sur OpenFoodFacts Canada.
-Le livrable combine:
-- orchestration ETL avec Airflow
-- stockage objet avec MinIO
-- modelisation relationnelle dans PostgreSQL
-- visualisation et administration via Streamlit
+## Application web d'exploration et de comparaison nutritionnelle des produits alimentaires vendus au Canada
+
+Plateforme data pour OpenFoodFacts Canada avec pipeline ETL Airflow, stockage MinIO, chargement PostgreSQL et interface Streamlit.
+L'architecture est conteneurisee avec Docker Compose et structuree en couches Bronze/Silver (Gold reserve pour la suite).
 
 ## 1. Objectifs
 
