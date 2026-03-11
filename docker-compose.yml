@@ -1,0 +1,238 @@
+version: "3.8"
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: docker/airflow/Dockerfile
+  environment: &airflow-common-env
+    AIRFLOW_HOME: ${AIRFLOW_HOME}
+    AIRFLOW__CORE__EXECUTOR: ${AIRFLOW__CORE__EXECUTOR}
+    AIRFLOW__CORE__LOAD_EXAMPLES: ${AIRFLOW__CORE__LOAD_EXAMPLES}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: ${AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY}
+    AIRFLOW__WEBSERVER__BASE_URL: http://localhost:8080
+
+    # ⚠️ IMPORTANT : metadata Airflow -> airflow-postgres (pas postgres_openfood)
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@airflow-postgres:5432/${AIRFLOW_DB}
+
+    # Variables utiles à tes DAGs (DB métier)
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: ${POSTGRES_PORT}
+    POSTGRES_DB: ${POSTGRES_DB}
+    POSTGRES_USER: ${POSTGRES_USER}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+    # MinIO
+    MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+    MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+    MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+    MINIO_BUCKET_BRONZE: ${MINIO_BUCKET_BRONZE}
+    MINIO_BUCKET_SILVER: ${MINIO_BUCKET_SILVER}
+    MINIO_BUCKET_GOLD: ${MINIO_BUCKET_GOLD}
+    MINIO_SECURE: ${MINIO_SECURE}
+
+    # OpenFood
+    OPENFOOD_API_URL: ${OPENFOOD_API_URL}
+    OPENFOOD_COUNTRY: ${OPENFOOD_COUNTRY}
+    SAMPLE_SIZE: ${SAMPLE_SIZE}
+
+  volumes:
+    - ./dags:${AIRFLOW_HOME}/dags
+    - ./scripts:${AIRFLOW_HOME}/scripts
+    - ./data:${AIRFLOW_HOME}/data
+    - ./logs:${AIRFLOW_HOME}/logs
+    - ./config:${AIRFLOW_HOME}/config
+  networks:
+    - openfood_network
+
+services:
+  # ---------- POSTGRES METIER (OpenFood) ----------
+  postgres:
+    image: postgres:16
+    container_name: postgres_openfood
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      # (optionnel) scripts schema métier
+      # - ./database/openfood_init:/docker-entrypoint-initdb.d
+    networks:
+      - openfood_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------- POSTGRES AIRFLOW METADATA ----------
+  airflow-postgres:
+    image: postgres:16
+    container_name: airflow_postgres
+    environment:
+      POSTGRES_DB: ${AIRFLOW_DB}
+      POSTGRES_USER: ${AIRFLOW_DB_USER}
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD}
+    volumes:
+      - ./data/airflow-postgres:/var/lib/postgresql/data
+    networks:
+      - openfood_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AIRFLOW_DB_USER} -d ${AIRFLOW_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------- MINIO ----------
+  minio:
+    image: minio/minio:latest
+    container_name: minio_openfood
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - ./data/minio:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - openfood_network
+    restart: unless-stopped
+
+  # ---------- MINIO INIT ----------
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio_init
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      mc alias set myminio http://minio:9000 ${MINIO_ACCESS_KEY} ${MINIO_SECRET_KEY};
+      mc mb myminio/${MINIO_BUCKET_BRONZE} --ignore-existing;
+      mc mb myminio/${MINIO_BUCKET_SILVER} --ignore-existing;
+      mc mb myminio/${MINIO_BUCKET_GOLD} --ignore-existing;
+      echo 'Buckets MinIO OK';
+      exit 0;
+      "
+    networks:
+      - openfood_network
+
+  # ---------- AIRFLOW INIT ----------
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow_init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        airflow db migrate
+        airflow users create \
+          --username admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com \
+          --password admin123 || true
+    restart: "no"
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  # ---------- AIRFLOW WEBSERVER ----------
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow_webserver
+    ports:
+      - "8080:8080"
+    command: airflow webserver
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ---------- AIRFLOW SCHEDULER ----------
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow_scheduler
+    command: airflow scheduler
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ---------- JUPYTER ----------
+  jupyter:
+    image: jupyter/datascience-notebook:latest
+    container_name: jupyter_openfood
+    ports:
+      - "8888:8888"
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+      JUPYTER_TOKEN: ${JUPYTER_TOKEN}
+      GRANT_SUDO: "yes"
+    user: root
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./scripts:/home/jovyan/scripts
+      - ./data:/home/jovyan/data
+      - ./dags:/home/jovyan/dags
+    command: start-notebook.sh --NotebookApp.token='${JUPYTER_TOKEN}'
+    networks:
+      - openfood_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+  # ---------- ADMINER ----------
+  adminer:
+    image: adminer:latest
+    container_name: adminer_openfood
+    ports:
+      - "8081:8080"
+    networks:
+      - openfood_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ---------- STREAMLIT APP ----------
+  streamlit-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: streamlit_openfood
+    ports:
+      - "8501:8501"
+    environment:
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_SCHEMA: ${POSTGRES_SCHEMA}
+    volumes:
+      - ./streamlit_app:/app
+    working_dir: /app 
+    command: streamlit run main.py --server.address=0.0.0.0 --server.port=8501
+    networks:
+      - openfood_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  openfood_network:
+    driver: bridge

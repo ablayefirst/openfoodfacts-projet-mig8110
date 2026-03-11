@@ -1,0 +1,117 @@
+ingredients:
+  blacklist_exact:
+    - unknown
+    - unknow
+    - none
+    - null
+    - n/a
+    - ingredients
+    - ingredient
+    - ingredients text
+  blacklist_contains:
+    - may contain
+    - peut contenir
+    - traces de
+  remove_words:
+    - ingredients
+    - ingredient
+    - contains
+  corrections:
+    cyanocobalamine: cyanocobalamin
+    microcristalline cellulose: microcrystalline cellulose
+    xanthan caraghennes gum: xanthan gum
+    calcium d-pantotherate: calcium d-pantothenate
+  standardization:
+    cane sugar: sugar
+    brown sugar: sugar
+    white sugar: sugar
+    soy lecithin: lecithin
+    sunflower lecithin: lecithin
+
+categories:
+  blacklist_exact:
+    - unknown
+    - unknow
+    - none
+    - null
+    - n/a
+  blacklist_contains: []
+  remove_words: []
+  corrections: {}
+  standardization: {}
+
+category_primary_mapping:
+  default: autres
+  ignore_contains:
+    - plant based foods and beverages
+    - plant based foods
+    - foods and beverages
+    - beverages and beverages preparations
+    - cereals and potatoes
+    - cereals and their products
+    - breakfasts
+    - fruits and vegetables based foods
+    - specific products
+    - products for specific diets
+    - groceries
+    - canned foods
+  # Ordered rules: first matching rule is selected.
+  rules:
+    - name: boisson
+      keywords: [boisson, boissons, beverage, beverages, drink, drinks, juice, jus, soda, sodas, cola, colas, water, waters, eau, tea, the, coffee, cafe, kombucha, mineral water, spring water, carbonated drink, carbonated drinks, unsweetened beverages, sweetened beverages, oat based drinks, almond based drinks, soy based drinks]
+    - name: produit_laitier
+      keywords: [lait, laitier, dairy, dairies, milk, milks, yogurt, yogurts, yaourt, cream, creme, fermented milk products, greek style yogurts, dairy desserts]
+    - name: fromage
+      keywords: [fromage, fromages, cheese, cheeses, cream cheese, cottage cheese, cheddar, camembert]
+    - name: fruit
+      keywords: [fruit, fruits, pomme, apple, banana, banane, berry, berries, agrume, citrus]
+    - name: legume
+      keywords: [legume, legumes, vegetable, vegetables, vegetables based foods, tomate, tomato, carotte, carrot, salade, spinach]
+    - name: cereale
+      keywords: [cereal, cereals, cereale, cereales, grain, grains, oat, oats, muesli, mueslis, breakfast cereal, breakfast cereals, flakes, cereal flakes, rolled flakes, rolled oats, extruded cereals, bran]
+    - name: pate
+      keywords: [pasta, noodles, nouille, nouilles, macaroni, spaghetti, penne, ravioli, lasagna, lasagne]
+    - name: pain
+      keywords: [pain, pains, bread, breads, baguette, toast, sliced breads, white breads, wholemeal breads, rye breads, crispbreads]
+    - name: riz
+      keywords: [riz, rice, basmati]
+    - name: viande
+      keywords: [viande, meat, beef, boeuf, pork, porc, lamb, agneau]
+    - name: poulet
+      keywords: [poulet, chicken, turkey, dinde]
+    - name: poisson
+      keywords: [poisson, fish, tuna, thon, salmon, saumon, seafood]
+    - name: dessert
+      keywords: [dessert, desserts, sweets, chocolate, chocolates, gateau, gateaux, cake, cakes, biscuit, biscuits, cookies, candy, candies, bonbon, glace, ice cream, sorbet, sorbets, pudding, puddings, compote, compotes, wafers]
+    - name: snack
+      keywords: [snack, snacks, salty snacks, appetizer, appetizers, amuse gueules, chips, crisps, chips and fries, popcorn, cracker, crackers, crackers appetizers, craquelin, craquelins, aperitif, pretzel, barres, bars, trail mix]
+    - name: sauce
+      keywords: [sauce, sauces, condiments, ketchup, mustard, mustards, moutarde, mayonnaise, mayonnaises, mayo, pesto, hot sauces, soy sauces, tomato sauces, oyster sauces, hoisin sauces, nuoc mam]
+    - name: huile
+      keywords: [huile, oil, olive oil, sunflower oil, canola, colza]
+    - name: legumineuse
+      keywords: [legumineuse, legumes and their products, legume sec, lentil, lentille, bean, beans, pois chiche, chickpea, pulses]
+    - name: noix
+      keywords: [noix, nuts, nuts and their products, almond, amande, walnut, cashew, pistachio, peanut, peanuts, arachide]
+    - name: soupe
+      keywords: [soup, soupe, bouillon]
+    - name: vinaigre
+      keywords: [vinaigre, vinegar]
+    - name: graine
+      keywords: [graine, graines, seed, seeds, sesame, chia, flax, lin]
+    - name: sucre
+      keywords: [sucre, sugar, syrup, sirop]
+    - name: farine
+      keywords: [farine, flour]
+    - name: miel
+      keywords: [miel, honey]
+    - name: condiment
+      keywords: [condiment, seasoning, assaisonnement, spice, epice]
+    - name: tartinade
+      keywords: [spread, spreads, tartinade, tartinades, sweet spreads, plant based spreads, pates a tartiner, pate a tartiner, hazelnut spreads, chocolate spreads, nut butters, peanut butters, cheese spreads]
+    - name: complement
+      keywords: [supplement, supplements, protein powder, protein powders, protein supplement, protein supplements, bodybuilding supplement, bodybuilding supplements, dietary supplement, dietary supplements, protein bars, energy bars, protein energy bars]
+    - name: boulangerie
+      keywords: [boulangerie, bakery, viennoiserie, viennoiseries, brioche, brioches, pastry, pastries, patisserie, patisseries, sweet pastries and pies, croissant, croissants, pain au chocolat, chocolatine, milk bread rolls]
+    - name: plat
+      keywords: [plat, plats, prepared meal, prepared meals, ready meal, ready meals, meal, meals, repas, frozen meal, frozen meals, microwave meals, pasta dishes, canned meals]
