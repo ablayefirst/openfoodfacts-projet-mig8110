@@ -45,7 +45,12 @@ st.markdown("""
 st.title("Détail du produit")
 
 conn = get_connection()
-warnings.filterwarnings("ignore", category=UserWarning)
+
+warnings.filterwarnings(
+    "ignore",
+    message="pandas only supports SQLAlchemy connectable",
+    category=UserWarning,
+)
 
 # -------------------------------------------------
 # RECUPERATION PRODUIT
@@ -55,7 +60,7 @@ code = st.session_state.get("selected_code")
 
 try:
     query_params = st.query_params
-except:
+except AttributeError:
     query_params = st.experimental_get_query_params()
 
 query_code = query_params.get("code")
@@ -84,21 +89,29 @@ DETAIL_QUERY = """
 SELECT
 p.code_produit AS code,
 p.nom_produit AS product_name,
+p.categorie_principale,
+p.quantite,
 p.nutrition_grade,
+p.nutriscore_score,
 p.nova_group,
+p.url,
 p.image_url,
+p.image_small_url,
 p.image_ingredients_url,
 p.image_nutrition_url,
 m.brands AS brand,
 COALESCE(string_agg(DISTINCT c.categorie, ', '),'Non spécifiée') AS categories,
 COALESCE(string_agg(DISTINCT ing.ingredients_nom, ', '),'Non spécifiés') AS ingredients,
 COALESCE(string_agg(DISTINCT a.allergens, ', '),'Non spécifiés') AS allergens,
+COALESCE(string_agg(DISTINCT lb.labels, ', '),'Non spécifiés') AS labels,
+COALESCE(string_agg(DISTINCT pays.countries_en, ', '),'Non spécifiés') AS countries,
 v.sugars_100g,
 v.salt_100g,
 v.fat_100g,
 v.saturated_fat_100g,
 v.proteins_100g,
-v.fiber_100g
+v.fiber_100g,
+v.carbohydrates_100g
 FROM produit p
 LEFT JOIN marque m ON p.id_marque = m.id_marque
 LEFT JOIN valeurs_nutritionnelles v ON p.code_produit = v.code_produit
@@ -108,14 +121,19 @@ LEFT JOIN produit_ingredient pi ON p.code_produit = pi.code_produit
 LEFT JOIN ingredient ing ON pi.id_ingredient = ing.id_ingredient
 LEFT JOIN produit_allergene pa ON p.code_produit = pa.code_produit
 LEFT JOIN allergene a ON pa.allergen_id = a.allergen_id
+LEFT JOIN produit_label pl ON p.code_produit = pl.code_produit
+LEFT JOIN label lb ON pl.label_id = lb.label_id
+LEFT JOIN produit_pays pp ON p.code_produit = pp.code_produit
+LEFT JOIN pays ON pp.id_pays = pays.id_pays
 WHERE p.code_produit = %s
 GROUP BY
-p.code_produit,p.nom_produit,
-p.nutrition_grade,p.nova_group,
-p.image_url,p.image_ingredients_url,p.image_nutrition_url,
+p.code_produit,p.nom_produit,p.categorie_principale,p.quantite,
+p.nutrition_grade,p.nutriscore_score,p.nova_group,
+p.url,p.image_url,p.image_small_url,p.image_ingredients_url,p.image_nutrition_url,
 m.brands,
 v.sugars_100g,v.salt_100g,v.fat_100g,
-v.saturated_fat_100g,v.proteins_100g,v.fiber_100g
+v.saturated_fat_100g,v.proteins_100g,v.fiber_100g,
+v.carbohydrates_100g
 """
 
 detail_df = pd.read_sql(DETAIL_QUERY, conn, params=(code,))
@@ -175,6 +193,9 @@ with col_info:
 
     st.markdown(f"**Marque :** {row.get('brand','N/A')}")
     st.markdown(f"**Catégories :** {row.get('categories','N/A')}")
+    st.markdown(f"**Pays :** {row.get('countries','N/A')}")
+    st.markdown(f"**Quantité :** {row.get('quantite','N/A')}")
+    st.markdown(f"**Labels :** {row.get('labels','N/A')}")
     st.markdown(f"**NOVA :** {row.get('nova_group','N/A')}")
 
 # -------------------------------------------------
@@ -195,6 +216,8 @@ c4.metric("🔥 Saturées", f"{row['saturated_fat_100g']:.2f} g")
 c5.metric("💪 Protéines", f"{row['proteins_100g']:.2f} g")
 c6.metric("🌾 Fibres", f"{row['fiber_100g']:.2f} g")
 
+st.markdown("**Glucides :** " + str(row.get("carbohydrates_100g","N/A")) + " g")
+
 # -------------------------------------------------
 # INGREDIENTS
 # -------------------------------------------------
@@ -204,119 +227,3 @@ st.write(row["ingredients"])
 
 st.markdown("## Allergènes")
 st.write(row["allergens"])
-
-# -------------------------------------------------
-# SUGGESTIONS
-# -------------------------------------------------
-
-st.markdown("---")
-st.markdown("## 🥗 Suggestions des produits similaires")
-
-current_categories=row["categories"]
-
-if current_categories and current_categories!="Non spécifiée":
-
-    first_category=current_categories.split(",")[0].strip()
-
-    SUGGESTION_QUERY="""
-    SELECT
-    p.code_produit,
-    p.nom_produit,
-    p.image_url,
-    v.sugars_100g,
-    v.salt_100g,
-    v.fat_100g,
-    v.saturated_fat_100g,
-    v.proteins_100g,
-    v.fiber_100g
-    FROM produit p
-    JOIN valeurs_nutritionnelles v
-    ON p.code_produit=v.code_produit
-    JOIN produit_categorie pc
-    ON p.code_produit=pc.code_produit
-    JOIN categorie c
-    ON pc.id_categorie=c.id_categorie
-    WHERE c.categorie ILIKE %s
-    AND p.code_produit<>%s
-
-    """
-
-    suggestion_df=pd.read_sql(
-        SUGGESTION_QUERY,
-        conn,
-        params=(f"%{first_category}%",code)
-    )
-
-    if not suggestion_df.empty:
-
-        def compare(value,current):
-
-            try:
-                value=float(value)
-                current=float(current)
-            except:
-                return "<span style='color:gray;'>N/A</span>"
-
-            value_str=f"{value:.2f}"
-
-            if value<current:
-                return f"<span style='color:green;'>↓ {value_str} g</span>"
-            elif value>current:
-                return f"<span style='color:red;'>↑ {value_str} g</span>"
-            else:
-                return f"<span style='color:gray;'>= {value_str} g</span>"
-
-        for i in range(0,len(suggestion_df),2):
-
-            cols=st.columns(2, gap="large")
-
-            for j in range(2):
-
-                if i+j>=len(suggestion_df):
-                    continue
-
-                sug=suggestion_df.iloc[i+j]
-
-                with cols[j]:
-
-                    st.markdown(f"""
-<div class="card">
-
-<img src="{sug['image_url']}" 
-style="
-width:90%;
-height:220px;
-object-fit:cover;
-border-radius:12px;
-display:block;
-margin-left:auto;
-margin-right:auto;
-">
-
-<h4 class="product-title">
-{sug['nom_produit']}
-</h4>
-
-<div class="nutrition-box">
-
-<div style="
-display:grid;
-grid-template-columns:1fr 1fr;
-gap:8px;
-">
-
-<div>🍬 Sucre {compare(sug['sugars_100g'],row['sugars_100g'])}</div>
-<div>🧂 Sel {compare(sug['salt_100g'],row['salt_100g'])}</div>
-<div>🧈 Graisses {compare(sug['fat_100g'],row['fat_100g'])}</div>
-<div>🔥 Saturées {compare(sug['saturated_fat_100g'],row['saturated_fat_100g'])}</div>
-<div>💪 Protéines {compare(sug['proteins_100g'],row['proteins_100g'])}</div>
-<div>🌾 Fibres {compare(sug['fiber_100g'],row['fiber_100g'])}</div>
-
-</div>
-</div>
-
-</div>
-""",unsafe_allow_html=True)
-
-    else:
-        st.info("Aucune suggestion trouvée.")

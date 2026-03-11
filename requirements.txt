@@ -1,0 +1,58 @@
+# ===============================
+# Core Data Processing
+# ===============================
+pandas>=2.0.0
+numpy>=1.24.0
+pyarrow>=12.0.0
+
+# ===============================
+# Database
+# ===============================
+sqlalchemy>=2.0.0
+psycopg[binary]>=3.1.0   # Driver PostgreSQL recommandé (remplace psycopg2-binary)
+
+# ===============================
+# Data Validation
+# ===============================
+great-expectations>=0.18.0
+pydantic>=2.0.0
+
+# ===============================
+# Web / API
+# ===============================
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+jinja2>=3.1.0
+python-multipart>=0.0.9      # Formulaires (login admin)
+itsdangerous>=2.1.2          # Sessions sécurisées admin
+python-dotenv>=1.0.0         # Chargement .env
+
+# ===============================
+# Streamlit Dashboard
+# ===============================
+streamlit>=1.28.0
+
+# ===============================
+# Utils
+# ===============================
+pyyaml>=6.0
+tqdm>=4.66.0
+requests>=2.31.0
+
+# ===============================
+# Visualisation
+# ===============================
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# ===============================
+# Images / Barcode
+# ===============================
+pillow>=10.0.0
+python-barcode>=0.15.1
+
+# ===============================
+# Notebooks
+# ===============================
+jupyter>=1.0.0
+ipykernel>=6.0.0
