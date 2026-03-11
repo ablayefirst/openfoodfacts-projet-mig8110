@@ -174,15 +174,35 @@ LEFT JOIN categorie c ON pc.id_categorie = c.id_categorie
 """
 
 if search_name:
-    query += f" AND LOWER(p.nom_produit) LIKE LOWER('%{search_name}%')"
+    query += " AND LOWER(p.nom_produit) LIKE LOWER(%(search_name)s)"
 
-if category_filter:
-    query += f" AND LOWER(c.categorie) LIKE LOWER('%{category_filter}%')"
+query_params = {"max_sugar": float(max_sugar)}
+
+if search_name:
+    query_params["search_name"] = f"%{search_name}%"
+
+if selected_main_category != "Toutes":
+    query += """
+    AND LOWER(COALESCE(NULLIF(TRIM(p.categorie_principale), ''), 'autres')) = LOWER(%(category_exact)s)
+    """
+    query_params["category_exact"] = selected_main_category
+
+if category_detail_filter:
+    query += """
+    AND EXISTS (
+        SELECT 1
+        FROM produit_categorie pc2
+        JOIN categorie c2 ON pc2.id_categorie = c2.id_categorie
+        WHERE pc2.code_produit = p.code_produit
+          AND LOWER(c2.categorie) LIKE LOWER(%(category_detail_filter)s)
+    )
+    """
+    query_params["category_detail_filter"] = f"%{category_detail_filter}%"
 
 # Filtre sucre
 query += " AND v.sugars_100g <= %(max_sugar)s"
 
-query += "\nGROUP BY p.code_produit, p.nom_produit, p.nutrition_grade, p.nova_group, p.image_url, v.sugars_100g, v.salt_100g, v.saturated_fat_100g, v.fiber_100g, v.proteins_100g"
+query += "\nGROUP BY p.code_produit, p.nom_produit, p.categorie_principale, p.nutrition_grade, p.nova_group, p.image_url, v.sugars_100g, v.salt_100g, v.saturated_fat_100g, v.fiber_100g, v.proteins_100g"
 
 warnings.filterwarnings(
     "ignore",
