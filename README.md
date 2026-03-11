@@ -1,219 +1,134 @@
-# OpenFood Web (FastAPI + PostgreSQL)
+# OpenFoodFacts Projet MIG8110
 
-## Objectif
+Projet de cours de type data platform pour exploiter des donnees OpenFoodFacts Canada:
+- ingestion depuis l'API OpenFoodFacts
+- stockage objet (MinIO)
+- transformation en couche Silver
+- chargement en base PostgreSQL
+- visualisation et administration via Streamlit
+- orchestration avec Apache Airflow
 
-Application web permettant la recherche et la consultation de produits OpenFoodFacts.
+## 1. Architecture
 
-Fonctionnalités principales :
-- Recherche par nom, marque, catégorie
-- Filtrage par allergènes
-- Tri par nom, NutriScore ou score nutritionnel
-- Page détail produit
-- Génération de code-barres
-- Affichage des images via l’API officielle OpenFoodFacts
+Composants principaux:
+- `postgres` : base metier OpenFood (`openfood_db`)
+- `airflow-postgres` : base metadata Airflow
+- `minio` + `minio-init` : stockage objets S3 compatible (bronze/silver/gold)
+- `airflow-webserver`, `airflow-scheduler`, `airflow-init` : orchestration ETL
+- `streamlit-app` : interface utilisateur et module admin
+- `jupyter` : exploration notebooks
+- `adminer` : interface SQL web
 
----
+Tout est lance via `docker-compose.yml`.
 
-## Technologies utilisées
+## 2. Arborescence utile
 
-Backend :
-- FastAPI (framework API Python)
-- Uvicorn (serveur ASGI)
-- SQLAlchemy (ORM et requêtes SQL)
-- psycopg2-binary (driver PostgreSQL)
+- `dags/openfood_pipeline_dag.py` : DAG Airflow principal
+- `dags/scripts/` : scripts ETL (extract, upload, transform, load)
+- `dags/sql/create_tables.sql` : creation du schema metier
+- `config/normalization_rules.yml` : regles de normalisation
+- `streamlit_app/main.py` : dashboard Streamlit
+- `streamlit_app/admin.py` : CRUD d'administration
+- `database/schema/create_tables.sql` : script SQL de schema (reference)
 
-Frontend :
-- Jinja2 (templates HTML)
-- StaticFiles (CSS, images, barcodes)
+## 3. Prerequis
 
-Base de données :
-- PostgreSQL
-
-Autres :
-- requests (API OpenFoodFacts)
-- python-barcode + pillow (génération code-barres)
-- pandas (utilisé uniquement pour scripts de chargement CSV si nécessaire)
-
----
-
-## Structure du dossier app/
-app/
-│
-├── main.py # Application FastAPI (routes + logique)
-├── db.py # Connexion SQLAlchemy (engine + SessionLocal)
-├── models.py # Modèles SQLAlchemy (Product, etc.)
-│
-├── templates/
-│ ├── index.html # Page liste / recherche
-│ └── product.html # Page détail produit
-│
-└── static/
-├── style.css
-└── barcodes/ # Images générées dynamiquement
-
----
-
-## Configuration de la base de données
-
-L’application utilise une variable d’environnement :
-
-DATABASE_URL
-
-Exemple pour PostgreSQL local :
-
-postgresql+psycopg2://postgres:admin@127.0.0.1:5432/openfoodfacts_canada
-
-Important :
-- Utiliser 127.0.0.1 au lieu de localhost (évite les problèmes IPv6)
-- Vérifier que PostgreSQL est démarré
-- Vérifier que le mot de passe est correct
-
----
-
-## Connexion SQLAlchemy attendue (db.py)
-
-Le fichier db.py doit contenir :
-
-- create_engine(DATABASE_URL, pool_pre_ping=True)
-- SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
-
----
-
-## Conformité modèle application ↔ base de données
-
-La base de données est normalisée (tables produit + tables N-N).
-
-L’application web attend un modèle “plat” de type :
-
-- code
-- product_name
-- brands
-- categories
-- ingredients_text
-- allergens_tags
-- nutriscore_grade
-- nutriscore_score
-- nova_group
-
-Pour éviter des JOIN complexes côté FastAPI, il est recommandé de créer une VIEW PostgreSQL.
-
----
-
-## VIEW recommandée côté PostgreSQL
-
-Créer une vue produit_view :
-
-```sql
-CREATE OR REPLACE VIEW produit_view AS
-SELECT
-  p.code_produit::text AS code,
-  p.nom_produit        AS product_name,
-  m.brands             AS brands,
-  p.nutrition_grade    AS nutriscore_grade,
-  p.nutriscore_score   AS nutriscore_score,
-  p.nova_group         AS nova_group,
-  p.url                AS product_url,
-
-  COALESCE(string_agg(DISTINCT c.categorie, ', '), '') AS categories,
-  COALESCE(string_agg(DISTINCT i.ingredients_nom, ', '), '') AS ingredients_text,
-  COALESCE(string_agg(DISTINCT a.allergens, ', '), '') AS allergens_tags
-
-FROM produit p
-LEFT JOIN marque m ON p.id_marque = m.id_marque
-LEFT JOIN produit_categorie pc ON pc.code_produit = p.code_produit
-LEFT JOIN categorie c ON c.id_categorie = pc.id_categorie
-LEFT JOIN produit_ingredient pi ON pi.code_produit = p.code_produit
-LEFT JOIN ingredient i ON i.id_ingredient = pi.id_ingredient
-LEFT JOIN produit_allergene pa ON pa.code_produit = p.code_produit
-LEFT JOIN allergene a ON a.allergen_id = pa.allergen_id
-GROUP BY
-  p.code_produit,
-  p.nom_produit,
-  m.brands,
-  p.nutrition_grade,
-  p.nutriscore_score,
-  p.nova_group,
-  p.url;
- 
- Ensuite, mapper le modèle SQLAlchemy sur cette VIEW.
-
-Lancer l’application en local
-1. Installer les dépendances
-
-À la racine du projet :
-
-pip install -r requirements.txt
-
-2. Définir la variable d’environnement (PowerShell)
-
-$env:DATABASE_URL="postgresql+psycopg2://postgres:admin@127.0.0.1:5432/openfoodfacts_canada"
-
-3. Lancer le serveur
-
-uvicorn app.main:app --reload
-
-4. Accéder à l’application
-
-http://127.0.0.1:8000
-
-Débogage
-
-Si erreur SQLAlchemy :
-
-Vérifier le mot de passe PostgreSQL
-
-Vérifier que la base existe
-
-Vérifier que le port est correct
-
-Si import sqlalchemy non résolu :
-
-Vérifier que VS Code utilise le bon environnement Python (.venv)
-
-Si erreur de connexion :
-
-Tester la connexion avec psql
-
-Vérifier netstat -aon | findstr 5432
-
-Notes importantes
-
-Le mot de passe ne s’affiche pas dans psql (normal).
-
-Si les tables sont vides, il faut charger les données via le script load_data.py.
-
-L’application peut fonctionner uniquement en mode DB (pas besoin de CSV si base remplie).
-
-## Démarrage docker
-
-### Prérequis
-- Docker Desktop installé et lancé
+- Docker + Docker Compose
 - Git
 
-### Pour les membres de l'équipe (déjà sur le projet)
+## 4. Installation rapide (remise)
+
+Depuis la racine du projet:
 
 ```bash
-# 1. Aller sur la branche develop (contient tout)
-git checkout develop
-git pull origin develop
-
-# 2. Configurer l'environnement (une seule fois)
 cp .env.example .env
-
-# 3. Lancer l'application
-docker compose up -d
+docker compose up -d --build
 docker compose ps
-   ```
-# Vérifier que tout tourne
+```
+
+Si un service ne demarre pas:
+
+```bash
+docker compose logs -f <service>
+```
+
+## 5. Acces aux services
+
+- Streamlit: http://localhost:8501
+- Airflow: http://localhost:8080  (admin / admin123)
+- Adminer: http://localhost:8081
+- MinIO Console: http://localhost:9001  (minioadmin / minioadmin123)
+- JupyterLab: http://localhost:8888  (token: `openfood2024`)
+
+## 6. Pipeline Airflow
+
+DAG: `openfood_pipeline_canada`
+
+Ordre des taches:
+1. `extract_products` (`extract_api_sample.py`)
+2. `upload_to_minio` (`upload_bronze_to_minio.py`)
+3. `transform_to_silver` (`transform_to_silver.py`)
+4. `load_to_postgres` (`load_to_postgres.py`)
+
+Planification: tous les jours a 02:00 (`schedule="0 2 * * *"`).
+
+Variables importantes (dans `.env`):
+- `OPENFOOD_API_URL`, `OPENFOOD_COUNTRY`, `SAMPLE_SIZE`
+- `MINIO_*`
+- `POSTGRES_*`
+- `AIRFLOW_*`
+
+## 7. Application Streamlit
+
+Fonctionnalites principales:
+- recherche produit par nom
+- filtre categorie principale
+- filtre categories detaillees
+- filtre NutriScore
+- tri nutrition (NutriScore, sucre, sel)
+- page detail produit
+- module Admin (ajout/modification/suppression)
+
+Identifiants admin Streamlit (par defaut):
+- utilisateur: `admin`
+- mot de passe: `admin123`
+
+(Variables surchargeables via `ADMIN_USER` et `ADMIN_PASSWORD`.)
+
+## 8. Lancement local sans Docker (optionnel)
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+streamlit run streamlit_app/main.py
+```
+
+Configurer au besoin les variables `POSTGRES_*` pour pointer vers la base.
+
+## 9. Troubleshooting
+
+- Verifier l'etat des conteneurs:
+```bash
 docker compose ps
-   ```
+```
+- Suivre les logs Airflow:
+```bash
+docker compose logs -f airflow-webserver airflow-scheduler
+```
+- Suivre les logs Streamlit:
+```bash
+docker compose logs -f streamlit-app
+```
+- Reinitialiser proprement (attention: supprime les conteneurs):
+```bash
+docker compose down
+```
 
-**C'est tout !** L'application est accessible sur :
-- Airflow : http://localhost:8080 (admin/admin123)
-- MinIO : http://localhost:9001 (minioadmin/minioadmin123)
-- Jupyter : http://localhost:8888 (token: openfood2024)
-- Dash : http://localhost:8050
+## 10. Etat actuel attendu
 
-### En cas de problème
-- Vérifiez que Docker Desktop est bien lancé
-- Regardez les logs : `docker compose logs -f`
+En environnement Docker sain:
+- Airflow est accessible et le DAG `openfood_pipeline_canada` est visible
+- MinIO contient les buckets `bronze`, `silver`, `gold`
+- PostgreSQL contient les tables metier OpenFood
+- Streamlit affiche les produits et permet la navigation Dashboard/Admin
