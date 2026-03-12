@@ -1,15 +1,9 @@
 import os
-import psycopg
-from psycopg import OperationalError
+import psycopg2
+from psycopg2 import OperationalError
 
 
 def get_connection():
-    """
-    Create and return a PostgreSQL connection using environment variables.
-    Designed for Docker environment (streamlit + postgres service).
-    """
-
-    # Read environment variables
     host = os.getenv("POSTGRES_HOST", "postgres")
     dbname = os.getenv("POSTGRES_DB", "openfood_db")
     user = os.getenv("POSTGRES_USER", "postgres")
@@ -17,7 +11,7 @@ def get_connection():
     port = os.getenv("POSTGRES_PORT", "5432")
 
     try:
-        connection = psycopg.connect(
+        connection = psycopg2.connect(
             host=host,
             dbname=dbname,
             user=user,

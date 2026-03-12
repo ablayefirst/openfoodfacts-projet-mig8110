@@ -10,7 +10,7 @@ def get_database_url() -> str:
     password = os.getenv("POSTGRES_PASSWORD", "postgres123")
 
     # psycopg v3
-    return f"postgresql+psycopg://{user}:{password}@{host}:{port}/{dbname}"
+    return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{dbname}"
 
 DATABASE_URL = get_database_url()
 
