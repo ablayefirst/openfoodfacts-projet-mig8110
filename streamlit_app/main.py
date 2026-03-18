@@ -43,9 +43,11 @@ def shorten_text(text: str, max_length: int = 30) -> str:
 
 st.set_page_config(page_title="Santé & Nutrition", layout="wide")
 
-# ===== MENU SIDEBAR =====
-st.sidebar.title("Menu")
-page = st.sidebar.radio("Aller à", ["Dashboard", "Admin"])
+page = st.sidebar.selectbox(
+    "",
+    ["Dashboard", "Admin"],
+    label_visibility="collapsed"
+)
 
 # Si admin -> on exécute admin et on stop ici (sinon le dashboard s'affiche aussi)
 if page == "Admin":
