@@ -1,4 +1,5 @@
 import os
+import math
 import random
 import warnings
 
@@ -42,9 +43,11 @@ def shorten_text(text: str, max_length: int = 30) -> str:
 
 st.set_page_config(page_title="Santé & Nutrition", layout="wide")
 
-# ===== MENU SIDEBAR =====
-st.sidebar.title("Menu")
-page = st.sidebar.radio("Aller à", ["Dashboard", "Admin"])
+page = st.sidebar.selectbox(
+    "",
+    ["Dashboard", "Admin"],
+    label_visibility="collapsed"
+)
 
 # Si admin -> on exécute admin et on stop ici (sinon le dashboard s'affiche aussi)
 if page == "Admin":
@@ -52,7 +55,7 @@ if page == "Admin":
     st.stop()
 
 # ==============================
-#  DASHBOARD (TON CODE ORIGINAL)
+#  DASHBOARD
 # ==============================
 
 # Titre avec logo sur la même ligne
@@ -75,6 +78,9 @@ if "selected_code" not in st.session_state:
 
 if "home_selection" not in st.session_state:
     st.session_state.home_selection = None
+
+if "page" not in st.session_state:
+    st.session_state.page = 1
 
 category_options = ["Toutes"]
 try:
@@ -150,6 +156,27 @@ with col6:
 category_detail_filter = st.text_input("Recherche libre dans catégories détaillées (optionnel)")
 
 # ==============================
+#  RESET PAGINATION SI FILTRES CHANGENT
+# ==============================
+current_filters_signature = (
+    search_name,
+    selected_main_category,
+    float(max_sugar),
+    tuple(nutriscore_filter),
+    sort_option,
+    sort_order,
+    category_detail_filter,
+)
+
+if "last_filters_signature" not in st.session_state:
+    st.session_state["last_filters_signature"] = current_filters_signature
+else:
+    if st.session_state["last_filters_signature"] != current_filters_signature:
+        st.session_state.page = 1
+        st.session_state.home_selection = None
+        st.session_state["last_filters_signature"] = current_filters_signature
+
+# ==============================
 #  REQUÊTE SQL DYNAMIQUE
 # ==============================
 
@@ -167,10 +194,10 @@ SELECT p.code_produit AS code,
        v.proteins_100g,
        COALESCE(string_agg(DISTINCT c.categorie, ', '), 'Non spécifiée') AS categories
 FROM produit p
-JOIN valeurs_nutritionnelles v ON p.code_produit = v.code_produit
+LEFT JOIN valeurs_nutritionnelles v ON p.code_produit = v.code_produit
 LEFT JOIN produit_categorie pc ON p.code_produit = pc.code_produit
 LEFT JOIN categorie c ON pc.id_categorie = c.id_categorie
-	WHERE 1=1
+WHERE 1=1
 """
 
 if search_name:
@@ -199,17 +226,60 @@ if category_detail_filter:
     """
     query_params["category_detail_filter"] = f"%{category_detail_filter}%"
 
-# Filtre sucre
-query += " AND v.sugars_100g <= %(max_sugar)s"
+# Filtre sucre : compatible avec les produits sans ligne nutritionnelle
+query += " AND (v.sugars_100g IS NULL OR v.sugars_100g <= %(max_sugar)s)"
 
-query += "\nGROUP BY p.code_produit, p.nom_produit, p.categorie_principale, p.nutrition_grade, p.nova_group, p.image_url, v.sugars_100g, v.salt_100g, v.saturated_fat_100g, v.fiber_100g, v.proteins_100g"
+query += """
+GROUP BY p.code_produit,
+         p.nom_produit,
+         p.categorie_principale,
+         p.nutrition_grade,
+         p.nova_group,
+         p.image_url,
+         v.sugars_100g,
+         v.salt_100g,
+         v.saturated_fat_100g,
+         v.fiber_100g,
+         v.proteins_100g
+"""
 
 warnings.filterwarnings(
     "ignore",
     message="pandas only supports SQLAlchemy connectable",
     category=UserWarning,
 )
-df = pd.read_sql(query, conn, params=query_params)
+
+try:
+    df = pd.read_sql(query, conn, params=query_params)
+except Exception as e:
+    st.error(f"Erreur lors du chargement des produits : {e}")
+    df = pd.DataFrame(
+        columns=[
+            "code",
+            "product_name",
+            "categorie_principale",
+            "nutriscore_grade",
+            "nova_group",
+            "image_url",
+            "sugars_100g",
+            "salt_100g",
+            "saturated_fat_100g",
+            "fiber_100g",
+            "proteins_100g",
+            "categories",
+        ]
+    )
+
+if "sugars_100g" not in df.columns:
+    df["sugars_100g"] = pd.NA
+if "salt_100g" not in df.columns:
+    df["salt_100g"] = pd.NA
+if "nutriscore_grade" not in df.columns:
+    df["nutriscore_grade"] = pd.NA
+if "image_url" not in df.columns:
+    df["image_url"] = pd.NA
+if "categories" not in df.columns:
+    df["categories"] = "Non spécifiée"
 
 df["sugars_clean"] = clean_nutrient_series(df["sugars_100g"], 50.0)
 df["salt_clean"] = clean_nutrient_series(df["salt_100g"], 25.0)
@@ -228,13 +298,15 @@ ascending = sort_order == "Croissant"
 if sort_option == "NutriScore (A→E)":
     order_map = {"A": 1, "B": 2, "C": 3, "D": 4, "E": 5}
     nutri_rank = nutri_series.map(order_map).fillna(99)
-    df = df.assign(_nutri_rank=nutri_rank).sort_values(
-        by="_nutri_rank", ascending=ascending
-    ).drop(columns="_nutri_rank")
+    df = (
+        df.assign(_nutri_rank=nutri_rank)
+        .sort_values(by="_nutri_rank", ascending=ascending)
+        .drop(columns="_nutri_rank")
+    )
 elif sort_option == "Sucre (g/100g)":
-    df = df.sort_values(by="sugars_clean", ascending=ascending)
+    df = df.sort_values(by="sugars_clean", ascending=ascending, na_position="last")
 elif sort_option == "Sel (g/100g)":
-    df = df.sort_values(by="salt_clean", ascending=ascending)
+    df = df.sort_values(by="salt_clean", ascending=ascending, na_position="last")
 
 # ==============================
 #  PAGINATION
@@ -249,23 +321,26 @@ is_home = (
 
 if is_home:
     if st.session_state.home_selection is None:
-        mask_img = df["image_url"].notna() & df["image_url"].astype(str).str.strip().ne("")
-        df_with_img = df[mask_img]
-
-        if len(df_with_img) >= 10:
-            selection = df_with_img.sample(10, random_state=random.randint(0, 1_000_000))
+        if df.empty:
+            st.session_state.home_selection = df.copy()
         else:
-            df_without_img = df[~mask_img]
-            needed = max(0, 10 - len(df_with_img))
-            extras = pd.DataFrame()
-            if needed > 0 and len(df_without_img) > 0:
-                extras = df_without_img.sample(
-                    min(needed, len(df_without_img)),
-                    random_state=random.randint(0, 1_000_000),
-                )
-            selection = pd.concat([df_with_img, extras]).head(10)
+            mask_img = df["image_url"].notna() & df["image_url"].astype(str).str.strip().ne("")
+            df_with_img = df[mask_img]
 
-        st.session_state.home_selection = selection.reset_index(drop=True)
+            if len(df_with_img) >= 10:
+                selection = df_with_img.sample(10, random_state=random.randint(0, 1_000_000))
+            else:
+                df_without_img = df[~mask_img]
+                needed = max(0, 10 - len(df_with_img))
+                extras = pd.DataFrame()
+                if needed > 0 and len(df_without_img) > 0:
+                    extras = df_without_img.sample(
+                        min(needed, len(df_without_img)),
+                        random_state=random.randint(0, 1_000_000),
+                    )
+                selection = pd.concat([df_with_img, extras]).head(10)
+
+            st.session_state.home_selection = selection.reset_index(drop=True)
 
     df_page = st.session_state.home_selection.copy()
     items_per_page = len(df_page)
@@ -276,10 +351,10 @@ else:
 
     items_per_page = 10
 
-    if "page" not in st.session_state:
-        st.session_state.page = 1
+    total_pages = max(1, (len(df) + items_per_page - 1) // items_per_page)
 
-    total_pages = max(1, (len(df) // items_per_page) + 1)
+    if st.session_state.page > total_pages:
+        st.session_state.page = total_pages
 
     start = (st.session_state.page - 1) * items_per_page
     end = start + items_per_page
@@ -322,6 +397,14 @@ for index, row in df_page.iterrows():
         if pd.isna(categorie_principale_display) or str(categorie_principale_display).strip() == "":
             categorie_principale_display = "autres"
 
+        product_name_display = row.get("product_name", "")
+        if pd.isna(product_name_display):
+            product_name_display = ""
+
+        nutriscore_display = row.get("nutriscore_grade", "N/A")
+        if pd.isna(nutriscore_display) or str(nutriscore_display).strip() == "":
+            nutriscore_display = "N/A"
+
         st.markdown(
             f"""
             <div style="
@@ -341,10 +424,10 @@ for index, row in df_page.iterrows():
                 </div>
                 <div style="flex:1 1 60%; max-width:60%; overflow:hidden;">
                     <h4 style="margin-top:0; margin-bottom:8px; word-wrap:break-word; display:flex; align-items:center; gap:6px;">
-                        <span>{row['product_name']}</span>{badge_html}</h4>   
+                        <span>{product_name_display}</span>{badge_html}</h4>
                     <p style="margin:2px 0;"><b>Catégorie principale:</b> {categorie_principale_display}</p>
                     <p style="margin:2px 0;"><b>Catégories détaillées:</b> {categories_display}</p>
-                    <p style="margin:2px 0;"><b>NutriScore:</b> {row['nutriscore_grade'] or 'N/A'}</p>
+                    <p style="margin:2px 0;"><b>NutriScore:</b> {nutriscore_display}</p>
                     <p style="margin:2px 0;">Sucre: {format_grams(clean_nutrient_value(row['sugars_100g'], 50.0))}</p>
                     <p style="margin:2px 0;">Sel: {format_grams(clean_nutrient_value(row['salt_100g'], 25.0))}</p>
                 </div>
@@ -376,10 +459,12 @@ if not is_home:
     with col1:
         if st.button("⬅️ Page précédente") and st.session_state.page > 1:
             st.session_state.page -= 1
+            st.rerun()
 
     with col3:
         if st.button("Page suivante ➡️") and st.session_state.page < total_pages:
             st.session_state.page += 1
+            st.rerun()
 
     st.write(f"Page {st.session_state.page} / {total_pages}")
 

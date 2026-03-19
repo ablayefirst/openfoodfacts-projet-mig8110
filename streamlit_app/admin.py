@@ -98,6 +98,16 @@ def _get_or_create_ingredients(db, ingredients_txt: str | None) -> list[Ingredie
     return out
 
 
+def _get_all_categories(db) -> list[Categorie]:
+    return (
+        db.execute(
+            select(Categorie).order_by(Categorie.categorie.asc())
+        )
+        .scalars()
+        .all()
+    )
+
+
 def _replace_product_categories(db, code_produit: str, categories: list[Categorie]) -> None:
     db.execute(
         delete(produit_categorie).where(produit_categorie.c.code_produit == code_produit)
@@ -118,6 +128,22 @@ def _replace_product_ingredients(db, code_produit: str, ingredients: list[Ingred
             insert(produit_ingredient),
             [{"code_produit": code_produit, "id_ingredient": i.id_ingredient} for i in ingredients],
         )
+
+
+def _get_selected_categories_for_product(db, code_produit: str) -> list[str]:
+    rows = db.execute(
+        select(Categorie.categorie)
+        .select_from(
+            produit_categorie.join(
+                Categorie,
+                produit_categorie.c.id_categorie == Categorie.id_categorie
+            )
+        )
+        .where(produit_categorie.c.code_produit == code_produit)
+        .order_by(Categorie.categorie.asc())
+    ).all()
+
+    return [row[0] for row in rows]
 
 
 # =========================
@@ -146,6 +172,10 @@ def _login_ui():
 def _logout_ui():
     if st.sidebar.button("Logout"):
         st.session_state.pop("admin_ok", None)
+        st.session_state.pop("admin_mode", None)
+        st.session_state.pop("admin_code", None)
+        st.session_state.pop("admin_q", None)
+        st.session_state.pop("admin_page", None)
         st.rerun()
 
 
@@ -182,8 +212,7 @@ def _products_list_ui():
         if qn:
             like = f"%{qn}%"
             if qn.isdigit():
-                # code_produit est Text dans ton modèle
-                query_db = query_db.filter(Product.code_produit == str(int(qn)))
+                query_db = query_db.filter(Product.code_produit == qn)
             else:
                 query_db = query_db.filter(
                     or_(
@@ -196,8 +225,10 @@ def _products_list_ui():
 
         total = query_db.count()
         total_pages = max(1, math.ceil(total / per_page))
+
         if page > total_pages:
             page = total_pages
+            st.session_state["admin_page"] = page
 
         products = (
             query_db.order_by(Product.code_produit.desc())
@@ -211,12 +242,14 @@ def _products_list_ui():
         st.divider()
         if st.button("➕ Ajouter un produit"):
             st.session_state["admin_mode"] = "new"
+            st.session_state.pop("admin_code", None)
             st.rerun()
 
         st.divider()
 
         for p in products:
             col1, col2, col3 = st.columns([3, 1, 1])
+
             with col1:
                 st.write(f"**{p.code_produit}** — {p.nom_produit or ''}")
                 st.caption(
@@ -224,15 +257,17 @@ def _products_list_ui():
                     f"Nova: {p.nova_group or 'N/A'} | "
                     f"Marque: {p.brands or 'N/A'}"
                 )
+
             with col2:
                 if st.button("✏️ Modifier", key=f"edit_{p.code_produit}"):
                     st.session_state["admin_mode"] = "edit"
-                    st.session_state["admin_code"] = p.code_produit
+                    st.session_state["admin_code"] = str(p.code_produit)
                     st.rerun()
+
             with col3:
                 if st.button("🗑️ Supprimer", key=f"del_{p.code_produit}"):
                     st.session_state["admin_mode"] = "delete"
-                    st.session_state["admin_code"] = p.code_produit
+                    st.session_state["admin_code"] = str(p.code_produit)
                     st.rerun()
 
     finally:
@@ -247,41 +282,90 @@ def _product_form_ui(is_edit: bool, code: str | None = None):
     p = None
 
     try:
+        code_clean = None
+
         if is_edit:
-            p = db.query(Product).filter(Product.code_produit == str(code)).first()
+            code_clean = str(code).strip()
+
+            if not code_clean:
+                st.error("Code produit invalide.")
+                if st.button("⬅️ Retour"):
+                    st.session_state["admin_mode"] = "list"
+                    st.session_state.pop("admin_code", None)
+                    st.rerun()
+                return
+
+            p = db.query(Product).filter(Product.code_produit == code_clean).first()
+
             if not p:
                 st.error("Produit introuvable.")
                 if st.button("⬅️ Retour"):
                     st.session_state["admin_mode"] = "list"
+                    st.session_state.pop("admin_code", None)
                     st.rerun()
                 return
+
+        all_categories = _get_all_categories(db)
+        category_map = {c.categorie: c for c in all_categories}
+        category_labels = list(category_map.keys())
+
+        selected_categories_default = []
+        if p:
+            selected_categories_default = _get_selected_categories_for_product(
+                db,
+                str(p.code_produit)
+            )
 
         st.subheader("✏️ Modifier un produit" if is_edit else "➕ Ajouter un produit")
 
         with st.form("product_form", clear_on_submit=False):
-            code_val = st.text_input("Code produit", value=(p.code_produit if p else ""))
-            name_val = st.text_input("Nom produit", value=((p.nom_produit or "") if p else ""))
+            code_val = st.text_input(
+                "Code produit",
+                value=(str(p.code_produit) if p else ""),
+                disabled=is_edit,
+            )
 
-            grade_val = st.text_input("Nutrition grade (A-E)", value=((p.nutrition_grade or "") if p else ""))
+            name_val = st.text_input(
+                "Nom produit",
+                value=((p.nom_produit or "") if p else "")
+            )
+
+            grade_val = st.text_input(
+                "Nutrition grade (A-E)",
+                value=((p.nutrition_grade or "") if p else "")
+            )
+
             nutri_score_val = st.text_input(
                 "Nutriscore score (int)",
                 value=(str(p.nutriscore_score) if p and p.nutriscore_score is not None else ""),
             )
+
             nova_val = st.text_input(
                 "Nova group (int)",
                 value=(str(p.nova_group) if p and p.nova_group is not None else ""),
             )
 
-            url_val = st.text_input("URL", value=((p.url or "") if p else ""))
-            image_url_val = st.text_input("Image URL", value=((p.image_url or "") if p else ""))
-
-            # ✅ Champs relations (comme FastAPI)
-            marque_nom = st.text_input("Marque", value=((p.brands or "") if p else ""))
-            categories_txt = st.text_area(
-                "Catégories (séparées par , ou |)",
-                value=((p.categories or "") if p else ""),
-                height=80,
+            url_val = st.text_input(
+                "URL",
+                value=((p.url or "") if p else "")
             )
+
+            image_url_val = st.text_input(
+                "Image URL",
+                value=((p.image_url or "") if p else "")
+            )
+
+            marque_nom = st.text_input(
+                "Marque",
+                value=((p.brands or "") if p else "")
+            )
+
+            selected_categories_labels = st.multiselect(
+                "Catégories",
+                options=category_labels,
+                default=selected_categories_default,
+            )
+
             ingredients_txt = st.text_area(
                 "Ingrédients (séparés par , ou |)",
                 value=((p.ingredients_text or "") if p else ""),
@@ -295,21 +379,22 @@ def _product_form_ui(is_edit: bool, code: str | None = None):
                 if not code_val.strip():
                     st.error("Code produit obligatoire.")
                     return
+
                 if not name_val.strip():
                     st.error("Nom produit obligatoire.")
                     return
 
-                # NEW
+                code_clean = code_val.strip()
+
                 if not is_edit:
-                    exists = db.query(Product).filter(Product.code_produit == code_val.strip()).first()
+                    exists = db.query(Product).filter(Product.code_produit == code_clean).first()
                     if exists:
                         st.error("Ce code produit existe déjà.")
                         return
 
-                    p = Product(code_produit=code_val.strip())
+                    p = Product(code_produit=code_clean)
                     db.add(p)
 
-                # UPDATE champs simples
                 p.nom_produit = name_val.strip()
                 p.nutrition_grade = (grade_val.strip()[:1].upper() if grade_val.strip() else None)
                 p.nutriscore_score = (int(nutri_score_val) if nutri_score_val.strip() else None)
@@ -317,29 +402,34 @@ def _product_form_ui(is_edit: bool, code: str | None = None):
                 p.url = (url_val.strip() or None)
                 p.image_url = (image_url_val.strip() or None)
 
-                # ✅ Marque / Catégories / Ingrédients (relations)
                 m = _get_or_create_marque(db, marque_nom)
                 p.id_marque = (m.id_marque if m else None)
 
                 db.flush()
 
-                cats = _get_or_create_categories(db, categories_txt)
+                cats = [category_map[label] for label in selected_categories_labels]
                 ings = _get_or_create_ingredients(db, ingredients_txt)
 
-                _replace_product_categories(db, p.code_produit, cats)
-                _replace_product_ingredients(db, p.code_produit, ings)
+                _replace_product_categories(db, str(p.code_produit), cats)
+                _replace_product_ingredients(db, str(p.code_produit), ings)
 
                 db.commit()
                 st.success("✅ Enregistré.")
                 st.session_state["admin_mode"] = "list"
+                st.session_state.pop("admin_code", None)
                 st.rerun()
 
             except (ValueError, SQLAlchemyError) as e:
                 db.rollback()
                 st.error(f"Erreur enregistrement: {e}")
 
+            except Exception as e:
+                db.rollback()
+                st.error(f"Erreur inattendue enregistrement: {e}")
+
         if st.button("⬅️ Retour"):
             st.session_state["admin_mode"] = "list"
+            st.session_state.pop("admin_code", None)
             st.rerun()
 
     finally:
@@ -349,39 +439,67 @@ def _product_form_ui(is_edit: bool, code: str | None = None):
 # =========================
 # Admin - Delete confirm
 # =========================
-def _delete_ui(code: str):
+def _delete_ui(code: str | None):
     st.subheader(f"🗑️ Supprimer produit {code}")
+
+    code_clean = str(code).strip() if code is not None else ""
+
+    if not code_clean:
+        st.error("Code produit invalide.")
+        if st.button("⬅️ Retour à la liste"):
+            st.session_state["admin_mode"] = "list"
+            st.session_state.pop("admin_code", None)
+            st.rerun()
+        return
 
     db = SessionLocal()
     try:
-        p = db.query(Product).filter(Product.code_produit == str(code)).first()
+        p = db.query(Product).filter(Product.code_produit == code_clean).first()
+
         if not p:
             st.error("Produit introuvable.")
             st.session_state["admin_mode"] = "list"
+            st.session_state.pop("admin_code", None)
             st.rerun()
             return
 
         st.warning("Cette action est irréversible.")
+
         c1, c2 = st.columns(2)
+
         with c1:
             if st.button("✅ Confirmer suppression"):
                 try:
-                    # Nettoyage associations avant delete (recommandé)
-                    db.execute(delete(produit_categorie).where(produit_categorie.c.code_produit == str(code)))
-                    db.execute(delete(produit_ingredient).where(produit_ingredient.c.code_produit == str(code)))
+                    db.execute(
+                        delete(produit_categorie).where(produit_categorie.c.code_produit == code_clean)
+                    )
+
+                    db.execute(
+                        delete(produit_ingredient).where(produit_ingredient.c.code_produit == code_clean)
+                    )
 
                     db.delete(p)
                     db.commit()
+
                     st.success("Supprimé ✅")
                     st.session_state["admin_mode"] = "list"
+                    st.session_state.pop("admin_code", None)
                     st.rerun()
+
                 except SQLAlchemyError as e:
                     db.rollback()
                     st.error(f"Erreur suppression: {e}")
+
+                except Exception as e:
+                    db.rollback()
+                    st.error(f"Erreur inattendue suppression: {e}")
+
         with c2:
             if st.button("❌ Annuler"):
                 st.session_state["admin_mode"] = "list"
+                st.session_state.pop("admin_code", None)
                 st.rerun()
+
     finally:
         db.close()
 
@@ -398,14 +516,19 @@ def run_admin():
     _logout_ui()
 
     mode = st.session_state.get("admin_mode", "list")
+
     if mode == "list":
         _products_list_ui()
+
     elif mode == "new":
         _product_form_ui(is_edit=False)
+
     elif mode == "edit":
         _product_form_ui(is_edit=True, code=st.session_state.get("admin_code"))
+
     elif mode == "delete":
         _delete_ui(code=st.session_state.get("admin_code"))
+
     else:
         st.session_state["admin_mode"] = "list"
         st.rerun()
