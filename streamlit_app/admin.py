@@ -98,6 +98,16 @@ def _get_or_create_ingredients(db, ingredients_txt: str | None) -> list[Ingredie
     return out
 
 
+def _get_all_categories(db) -> list[Categorie]:
+    return (
+        db.execute(
+            select(Categorie).order_by(Categorie.categorie.asc())
+        )
+        .scalars()
+        .all()
+    )
+
+
 def _replace_product_categories(db, code_produit: str, categories: list[Categorie]) -> None:
     db.execute(
         delete(produit_categorie).where(produit_categorie.c.code_produit == code_produit)
@@ -118,6 +128,22 @@ def _replace_product_ingredients(db, code_produit: str, ingredients: list[Ingred
             insert(produit_ingredient),
             [{"code_produit": code_produit, "id_ingredient": i.id_ingredient} for i in ingredients],
         )
+
+
+def _get_selected_categories_for_product(db, code_produit: str) -> list[str]:
+    rows = db.execute(
+        select(Categorie.categorie)
+        .select_from(
+            produit_categorie.join(
+                Categorie,
+                produit_categorie.c.id_categorie == Categorie.id_categorie
+            )
+        )
+        .where(produit_categorie.c.code_produit == code_produit)
+        .order_by(Categorie.categorie.asc())
+    ).all()
+
+    return [row[0] for row in rows]
 
 
 # =========================
@@ -279,6 +305,17 @@ def _product_form_ui(is_edit: bool, code: str | None = None):
                     st.rerun()
                 return
 
+        all_categories = _get_all_categories(db)
+        category_map = {c.categorie: c for c in all_categories}
+        category_labels = list(category_map.keys())
+
+        selected_categories_default = []
+        if p:
+            selected_categories_default = _get_selected_categories_for_product(
+                db,
+                str(p.code_produit)
+            )
+
         st.subheader("✏️ Modifier un produit" if is_edit else "➕ Ajouter un produit")
 
         with st.form("product_form", clear_on_submit=False):
@@ -323,10 +360,10 @@ def _product_form_ui(is_edit: bool, code: str | None = None):
                 value=((p.brands or "") if p else "")
             )
 
-            categories_txt = st.text_area(
-                "Catégories (séparées par , ou |)",
-                value=((p.categories or "") if p else ""),
-                height=80,
+            selected_categories_labels = st.multiselect(
+                "Catégories",
+                options=category_labels,
+                default=selected_categories_default,
             )
 
             ingredients_txt = st.text_area(
@@ -365,17 +402,12 @@ def _product_form_ui(is_edit: bool, code: str | None = None):
                 p.url = (url_val.strip() or None)
                 p.image_url = (image_url_val.strip() or None)
 
-                # Synchronisation des champs texte visibles
-                p.brands = (marque_nom.strip() if marque_nom and marque_nom.strip() else None)
-                p.categories = (categories_txt.strip() if categories_txt and categories_txt.strip() else None)
-                p.ingredients_text = (ingredients_txt.strip() if ingredients_txt and ingredients_txt.strip() else None)
-
                 m = _get_or_create_marque(db, marque_nom)
                 p.id_marque = (m.id_marque if m else None)
 
                 db.flush()
 
-                cats = _get_or_create_categories(db, categories_txt)
+                cats = [category_map[label] for label in selected_categories_labels]
                 ings = _get_or_create_ingredients(db, ingredients_txt)
 
                 _replace_product_categories(db, str(p.code_produit), cats)
