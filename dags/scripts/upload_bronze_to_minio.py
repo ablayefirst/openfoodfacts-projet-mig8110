@@ -51,6 +51,7 @@ def main():
 def upload_to_minio(
     input_dir: str = "/opt/airflow/data",
     filename: str = "openfood_sample.jsonl",
+    local_path: str = None,
     bucket: str = None,
     key: str = None,
     **_,
@@ -62,9 +63,9 @@ def upload_to_minio(
     if bucket is None:
         bucket = os.getenv("MINIO_BUCKET_BRONZE", "bronze")
 
-    local_path = Path(input_dir) / "bronze" / filename
-    if not local_path.exists():
-        raise FileNotFoundError(f"Local file not found: {local_path}")
+    resolved_local_path = Path(local_path) if local_path else Path(input_dir) / "bronze" / filename
+    if not resolved_local_path.exists():
+        raise FileNotFoundError(f"Local file not found: {resolved_local_path}")
 
     endpoint = os.environ["MINIO_ENDPOINT"]          # ex: minio:9000
     access_key = os.environ["MINIO_ACCESS_KEY"]
@@ -76,7 +77,7 @@ def upload_to_minio(
 
     # Key par défaut dans MinIO
     if key is None:
-        key = f"openfood/{filename}"
+        key = f"openfood/{resolved_local_path.name}"
 
     s3 = boto3.client(
         "s3",
@@ -91,11 +92,11 @@ def upload_to_minio(
     if bucket not in existing:
         s3.create_bucket(Bucket=bucket)
 
-    s3.upload_file(str(local_path), bucket, key)
-    print(f"Uploaded: {local_path} -> s3://{bucket}/{key} (endpoint={endpoint_url})")
+    s3.upload_file(str(resolved_local_path), bucket, key)
+    print(f"Uploaded: {resolved_local_path} -> s3://{bucket}/{key} (endpoint={endpoint_url})")
 
     # utile si on veut pousser via XCom plus tard
-    return {"bucket": bucket, "key": key}
+    return {"bucket": bucket, "key": key, "local_path": str(resolved_local_path)}
 
 
 if __name__ == "__main__":
