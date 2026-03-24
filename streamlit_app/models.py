@@ -98,8 +98,6 @@ class Product(Base):
     url = Column(Text)
     image_url = Column(Text)
     image_small_url = Column(Text)
-    image_ingredients_url = Column(Text)
-    image_ingredients_small_url = Column(Text)
     image_nutrition_url = Column(Text)
     id_marque = Column(Integer, ForeignKey("marque.id_marque"))
     marque = relationship("Marque", lazy="joined")
@@ -173,4 +171,3 @@ class Product(Base):
         .where(ValeursNutritionnelles.code_produit == code_produit)
         .scalar_subquery()
     )
-

@@ -19,12 +19,13 @@ import argparse
 import ast
 import os
 import re
-from io import BytesIO
 from pathlib import Path
+import tempfile
 
 import boto3
 import pandas as pd
 import psycopg2
+import pyarrow.parquet as pq
 from botocore.client import Config
 
 
@@ -133,6 +134,23 @@ def normalize_code(value):
     return txt
 
 
+def clean_optional_text(value):
+    txt = clean_text(value)
+    if txt in {"None", "null"}:
+        return None
+    return txt
+
+
+def clean_optional_bigint(value):
+    txt = clean_optional_text(value)
+    if txt is None:
+        return None
+    try:
+        return int(txt)
+    except (TypeError, ValueError):
+        return None
+
+
 def normalize_nutrition_grade(value):
     """
     Keep only valid Nutri-Score letters for CHAR(1) column.
@@ -183,6 +201,12 @@ def split_values(value):
     raw_items = []
     if isinstance(value, (list, tuple, set)):
         raw_items = list(value)
+    elif hasattr(value, "tolist") and not isinstance(value, str):
+        converted = value.tolist()
+        if isinstance(converted, (list, tuple, set)):
+            raw_items = list(converted)
+        else:
+            raw_items = [converted]
     elif isinstance(value, str):
         txt = value.strip()
         if not txt:
@@ -374,26 +398,22 @@ def upsert_product(cur, row: pd.Series, marque_id):
             url,
             image_url,
             image_small_url,
-            image_ingredients_url,
-            image_ingredients_small_url,
             image_nutrition_url,
             id_marque
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (code_produit) DO UPDATE SET
-            nom_produit = COALESCE(EXCLUDED.nom_produit, produit.nom_produit),
-            quantite = COALESCE(EXCLUDED.quantite, produit.quantite),
-            categorie_principale = COALESCE(EXCLUDED.categorie_principale, produit.categorie_principale),
-            nutrition_grade = COALESCE(EXCLUDED.nutrition_grade, produit.nutrition_grade),
-            nutriscore_score = COALESCE(EXCLUDED.nutriscore_score, produit.nutriscore_score),
-            nova_group = COALESCE(EXCLUDED.nova_group, produit.nova_group),
-            url = COALESCE(EXCLUDED.url, produit.url),
-            image_url = COALESCE(EXCLUDED.image_url, produit.image_url),
-            image_small_url = COALESCE(EXCLUDED.image_small_url, produit.image_small_url),
-            image_ingredients_url = COALESCE(EXCLUDED.image_ingredients_url, produit.image_ingredients_url),
-            image_ingredients_small_url = COALESCE(EXCLUDED.image_ingredients_small_url, produit.image_ingredients_small_url),
-            image_nutrition_url = COALESCE(EXCLUDED.image_nutrition_url, produit.image_nutrition_url),
-            id_marque = COALESCE(EXCLUDED.id_marque, produit.id_marque)
+            nom_produit = EXCLUDED.nom_produit,
+            quantite = EXCLUDED.quantite,
+            categorie_principale = EXCLUDED.categorie_principale,
+            nutrition_grade = EXCLUDED.nutrition_grade,
+            nutriscore_score = EXCLUDED.nutriscore_score,
+            nova_group = EXCLUDED.nova_group,
+            url = EXCLUDED.url,
+            image_url = EXCLUDED.image_url,
+            image_small_url = EXCLUDED.image_small_url,
+            image_nutrition_url = EXCLUDED.image_nutrition_url,
+            id_marque = EXCLUDED.id_marque
         """,
         (
             normalize_code(row.get("code")),
@@ -406,8 +426,6 @@ def upsert_product(cur, row: pd.Series, marque_id):
             clean_text(row.get("url")),
             clean_text(row.get("image_url")),
             clean_text(row.get("image_small_url")),
-            clean_text(row.get("image_ingredients_url")),
-            clean_text(row.get("image_ingredients_small_url")),
             clean_text(row.get("image_nutrition_url")),
             marque_id,
         ),
@@ -430,14 +448,14 @@ def upsert_nutrition(cur, row: pd.Series):
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (code_produit) DO UPDATE SET
-            energy_kcal_100g = COALESCE(EXCLUDED.energy_kcal_100g, valeurs_nutritionnelles.energy_kcal_100g),
-            saturated_fat_100g = COALESCE(EXCLUDED.saturated_fat_100g, valeurs_nutritionnelles.saturated_fat_100g),
-            sugars_100g = COALESCE(EXCLUDED.sugars_100g, valeurs_nutritionnelles.sugars_100g),
-            fiber_100g = COALESCE(EXCLUDED.fiber_100g, valeurs_nutritionnelles.fiber_100g),
-            proteins_100g = COALESCE(EXCLUDED.proteins_100g, valeurs_nutritionnelles.proteins_100g),
-            salt_100g = COALESCE(EXCLUDED.salt_100g, valeurs_nutritionnelles.salt_100g),
-            carbohydrates_100g = COALESCE(EXCLUDED.carbohydrates_100g, valeurs_nutritionnelles.carbohydrates_100g),
-            fat_100g = COALESCE(EXCLUDED.fat_100g, valeurs_nutritionnelles.fat_100g)
+            energy_kcal_100g = EXCLUDED.energy_kcal_100g,
+            saturated_fat_100g = EXCLUDED.saturated_fat_100g,
+            sugars_100g = EXCLUDED.sugars_100g,
+            fiber_100g = EXCLUDED.fiber_100g,
+            proteins_100g = EXCLUDED.proteins_100g,
+            salt_100g = EXCLUDED.salt_100g,
+            carbohydrates_100g = EXCLUDED.carbohydrates_100g,
+            fat_100g = EXCLUDED.fat_100g
         """,
         (
             normalize_code(row.get("code")),
@@ -461,26 +479,225 @@ def insert_link(cur, table: str, id_col: str, code_produit: str, entity_id):
     return cur.rowcount > 0
 
 
+def clear_product_links(cur, code_produit: str):
+    for table in (
+        "produit_categorie",
+        "produit_ingredient",
+        "produit_pays",
+        "produit_allergene",
+        "produit_label",
+    ):
+        cur.execute(f"DELETE FROM {table} WHERE code_produit = %s", (code_produit,))
+
+
+def delete_missing_products_from_full_snapshot(cur, imported_codes: set[str]) -> int:
+    if not imported_codes:
+        return 0
+
+    cur.execute("SELECT code_produit FROM produit")
+    existing_codes = {row[0] for row in cur.fetchall()}
+    missing_codes = list(existing_codes - imported_codes)
+    if not missing_codes:
+        return 0
+
+    cur.execute("DELETE FROM produit WHERE code_produit = ANY(%s)", (missing_codes,))
+    return cur.rowcount
+
+
+def record_import_history(
+    cur,
+    import_type: str | None,
+    bronze_key: str | None,
+    silver_key: str | None,
+    source_reference: str | None,
+    source_start_ts: int | None,
+    source_end_ts: int | None,
+    stats: dict[str, int],
+):
+    if not import_type:
+        return
+
+    cur.execute(
+        """
+        INSERT INTO etl_import_history (
+            import_type,
+            bronze_key,
+            silver_key,
+            source_reference,
+            source_start_ts,
+            source_end_ts,
+            rows_input,
+            rows_loaded
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            import_type,
+            bronze_key,
+            silver_key,
+            source_reference,
+            source_start_ts,
+            source_end_ts,
+            stats["rows_input"],
+            stats["rows_loaded"],
+        ),
+    )
+
+
 # -----------------------------
 # Core loader
 # -----------------------------
-def load_dataframe_to_postgres(df: pd.DataFrame, schema_sql_path: str | None = None) -> dict[str, int]:
-    if df.empty:
-        print("No rows to load from Silver Parquet.")
-        return {
-            "rows_input": 0,
-            "rows_loaded": 0,
-            "rows_skipped_missing_keys": 0,
-            "products_inserted": 0,
-            "products_updated": 0,
-            "nutrition_inserted": 0,
-            "nutrition_updated": 0,
-            "links_inserted": 0,
-        }
+def load_dataframe_rows(
+    cur,
+    df: pd.DataFrame,
+    stats: dict[str, int],
+    caches: dict[str, dict[str, int]],
+    imported_codes: set[str],
+):
+    cache_marque = caches["marque"]
+    cache_categorie = caches["categorie"]
+    cache_pays = caches["pays"]
+    cache_label = caches["label"]
+    cache_ingredient = caches["ingredient"]
+    cache_allergene = caches["allergene"]
 
+    stats["rows_input"] += len(df)
+
+    for _, row in df.iterrows():
+        code = normalize_code(row.get("code"))
+        product_name = clean_text(row.get("product_name"))
+
+        if not code or not product_name:
+            stats["rows_skipped_missing_keys"] += 1
+            continue
+
+        # ---- Brand (marque)
+        brand = clean_text(row.get("brands"))
+        marque_id = None
+        if brand:
+            if brand in cache_marque:
+                marque_id = cache_marque[brand]
+            else:
+                marque_id = get_or_create(cur, "marque", "id_marque", "brands", brand)
+                cache_marque[brand] = marque_id
+
+        # ---- Existing state (for metrics)
+        cur.execute("SELECT 1 FROM produit WHERE code_produit = %s LIMIT 1", (code,))
+        product_exists = cur.fetchone() is not None
+        cur.execute(
+            "SELECT 1 FROM valeurs_nutritionnelles WHERE code_produit = %s LIMIT 1",
+            (code,),
+        )
+        nutrition_exists = cur.fetchone() is not None
+
+        # ---- Produit + Nutrition
+        upsert_product(cur, row, marque_id)
+        upsert_nutrition(cur, row)
+        clear_product_links(cur, code)
+        if product_exists:
+            stats["products_updated"] += 1
+        else:
+            stats["products_inserted"] += 1
+        if nutrition_exists:
+            stats["nutrition_updated"] += 1
+        else:
+            stats["nutrition_inserted"] += 1
+
+        # ---- Categories: prefer categories_tags then categories
+        categories = split_values(row.get("categories_tags"))
+        if not categories:
+            categories = split_values(row.get("categories"))
+        for cat in categories:
+            cat_txt = clean_text(cat)
+            if not cat_txt:
+                continue
+            if cat_txt in cache_categorie:
+                cat_id = cache_categorie[cat_txt]
+            else:
+                cat_id = get_or_create(cur, "categorie", "id_categorie", "categorie", cat_txt)
+                cache_categorie[cat_txt] = cat_id
+            if insert_link(cur, "produit_categorie", "id_categorie", code, cat_id):
+                stats["links_inserted"] += 1
+
+        # ---- Ingredients: parse ingredients_text (robust)
+        ingredients = parse_ingredients_text(row.get("ingredients_text"))
+        for ing in ingredients:
+            if ing in cache_ingredient:
+                ing_id = cache_ingredient[ing]
+            else:
+                ing_id = get_or_create(cur, "ingredient", "id_ingredient", "ingredients_nom", ing)
+                cache_ingredient[ing] = ing_id
+            if insert_link(cur, "produit_ingredient", "id_ingredient", code, ing_id):
+                stats["links_inserted"] += 1
+
+        # ---- Countries: prefer countries_tags then countries; normalize tags
+        country_values = split_values(row.get("countries_tags"))
+        if not country_values:
+            country_values = split_values(row.get("countries"))
+
+        seen_countries = set()
+        for country in country_values:
+            norm = normalize_tag(country)
+            if not norm or norm in seen_countries:
+                continue
+            seen_countries.add(norm)
+
+            if norm in cache_pays:
+                country_id = cache_pays[norm]
+            else:
+                country_id = get_or_create(cur, "pays", "id_pays", "countries_en", norm)
+                cache_pays[norm] = country_id
+            if insert_link(cur, "produit_pays", "id_pays", code, country_id):
+                stats["links_inserted"] += 1
+
+        # ---- Labels: prefer labels_tags (already list in silver)
+        for label in split_values(row.get("labels_tags")):
+            lab = normalize_tag(label) or clean_text(label)
+            if not lab:
+                continue
+            if lab in cache_label:
+                label_id = cache_label[lab]
+            else:
+                label_id = get_or_create(cur, "label", "label_id", "labels", lab)
+                cache_label[lab] = label_id
+            if insert_link(cur, "produit_label", "label_id", code, label_id):
+                stats["links_inserted"] += 1
+
+        # ---- Allergens: allergens_tags + traces_tags (normalized)
+        allergen_values = split_values(row.get("allergens_tags")) + split_values(row.get("traces_tags"))
+        seen_all = set()
+        for allergen in allergen_values:
+            a = normalize_tag(allergen) or clean_text(allergen)
+            if not a or a in seen_all:
+                continue
+            seen_all.add(a)
+
+            if a in cache_allergene:
+                allergen_id = cache_allergene[a]
+            else:
+                allergen_id = get_or_create(cur, "allergene", "allergen_id", "allergens", a)
+                cache_allergene[a] = allergen_id
+            if insert_link(cur, "produit_allergene", "allergen_id", code, allergen_id):
+                stats["links_inserted"] += 1
+
+        imported_codes.add(code)
+        stats["rows_loaded"] += 1
+
+
+def load_parquet_to_postgres(
+    parquet_path: str,
+    schema_sql_path: str | None = None,
+    import_type: str | None = None,
+    bronze_key: str | None = None,
+    silver_key: str | None = None,
+    source_reference: str | None = None,
+    source_start_ts: int | None = None,
+    source_end_ts: int | None = None,
+    batch_size: int = 5000,
+) -> dict[str, int]:
     conn = get_pg_connection()
     stats = {
-        "rows_input": len(df),
+        "rows_input": 0,
         "rows_loaded": 0,
         "rows_skipped_missing_keys": 0,
         "products_inserted": 0,
@@ -488,15 +705,17 @@ def load_dataframe_to_postgres(df: pd.DataFrame, schema_sql_path: str | None = N
         "nutrition_inserted": 0,
         "nutrition_updated": 0,
         "links_inserted": 0,
+        "products_deleted": 0,
     }
 
-    # Small in-memory caches to reduce repeated SELECTs
-    cache_marque = {}
-    cache_categorie = {}
-    cache_pays = {}
-    cache_label = {}
-    cache_ingredient = {}
-    cache_allergene = {}
+    caches = {
+        "marque": {},
+        "categorie": {},
+        "pays": {},
+        "label": {},
+        "ingredient": {},
+        "allergene": {},
+    }
 
     try:
         with conn:
@@ -504,123 +723,30 @@ def load_dataframe_to_postgres(df: pd.DataFrame, schema_sql_path: str | None = N
                 # Ensure schema exists (safe even if already created)
                 ensure_schema(cur, schema_sql_path=schema_sql_path)
 
-                for _, row in df.iterrows():
-                    code = normalize_code(row.get("code"))
-                    product_name = clean_text(row.get("product_name"))
+                imported_codes: set[str] = set()
+                parquet_file = pq.ParquetFile(parquet_path)
+                has_batches = False
+                for batch in parquet_file.iter_batches(batch_size=batch_size):
+                    has_batches = True
+                    df = batch.to_pandas()
+                    load_dataframe_rows(cur, df, stats=stats, caches=caches, imported_codes=imported_codes)
 
-                    if not code or not product_name:
-                        stats["rows_skipped_missing_keys"] += 1
-                        continue
+                if not has_batches:
+                    print("No rows to load from Silver Parquet.")
 
-                    # ---- Brand (marque)
-                    brand = clean_text(row.get("brands"))
-                    marque_id = None
-                    if brand:
-                        if brand in cache_marque:
-                            marque_id = cache_marque[brand]
-                        else:
-                            marque_id = get_or_create(cur, "marque", "id_marque", "brands", brand)
-                            cache_marque[brand] = marque_id
+                if import_type == "full":
+                    stats["products_deleted"] = delete_missing_products_from_full_snapshot(cur, imported_codes)
 
-                    # ---- Existing state (for metrics)
-                    cur.execute("SELECT 1 FROM produit WHERE code_produit = %s LIMIT 1", (code,))
-                    product_exists = cur.fetchone() is not None
-                    cur.execute(
-                        "SELECT 1 FROM valeurs_nutritionnelles WHERE code_produit = %s LIMIT 1",
-                        (code,),
-                    )
-                    nutrition_exists = cur.fetchone() is not None
-
-                    # ---- Produit + Nutrition
-                    upsert_product(cur, row, marque_id)
-                    upsert_nutrition(cur, row)
-                    if product_exists:
-                        stats["products_updated"] += 1
-                    else:
-                        stats["products_inserted"] += 1
-                    if nutrition_exists:
-                        stats["nutrition_updated"] += 1
-                    else:
-                        stats["nutrition_inserted"] += 1
-
-                    # ---- Categories: prefer categories_tags then categories
-                    categories = split_values(row.get("categories_tags"))
-                    if not categories:
-                        categories = split_values(row.get("categories"))
-                    for cat in categories:
-                        cat_txt = clean_text(cat)
-                        if not cat_txt:
-                            continue
-                        if cat_txt in cache_categorie:
-                            cat_id = cache_categorie[cat_txt]
-                        else:
-                            cat_id = get_or_create(cur, "categorie", "id_categorie", "categorie", cat_txt)
-                            cache_categorie[cat_txt] = cat_id
-                        if insert_link(cur, "produit_categorie", "id_categorie", code, cat_id):
-                            stats["links_inserted"] += 1
-
-                    # ---- Ingredients: parse ingredients_text (robust)
-                    ingredients = parse_ingredients_text(row.get("ingredients_text"))
-                    for ing in ingredients:
-                        if ing in cache_ingredient:
-                            ing_id = cache_ingredient[ing]
-                        else:
-                            ing_id = get_or_create(cur, "ingredient", "id_ingredient", "ingredients_nom", ing)
-                            cache_ingredient[ing] = ing_id
-                        if insert_link(cur, "produit_ingredient", "id_ingredient", code, ing_id):
-                            stats["links_inserted"] += 1
-
-                    # ---- Countries: prefer countries_tags then countries; normalize tags
-                    country_values = split_values(row.get("countries_tags"))
-                    if not country_values:
-                        country_values = split_values(row.get("countries"))
-
-                    seen_countries = set()
-                    for country in country_values:
-                        norm = normalize_tag(country)
-                        if not norm or norm in seen_countries:
-                            continue
-                        seen_countries.add(norm)
-
-                        if norm in cache_pays:
-                            country_id = cache_pays[norm]
-                        else:
-                            country_id = get_or_create(cur, "pays", "id_pays", "countries_en", norm)
-                            cache_pays[norm] = country_id
-                        if insert_link(cur, "produit_pays", "id_pays", code, country_id):
-                            stats["links_inserted"] += 1
-
-                    # ---- Labels: prefer labels_tags (already list in silver)
-                    for label in split_values(row.get("labels_tags")):
-                        lab = normalize_tag(label) or clean_text(label)
-                        if not lab:
-                            continue
-                        if lab in cache_label:
-                            label_id = cache_label[lab]
-                        else:
-                            label_id = get_or_create(cur, "label", "label_id", "labels", lab)
-                            cache_label[lab] = label_id
-                        if insert_link(cur, "produit_label", "label_id", code, label_id):
-                            stats["links_inserted"] += 1
-
-                    # ---- Allergens: allergens_tags + traces_tags (normalized)
-                    allergen_values = split_values(row.get("allergens_tags")) + split_values(row.get("traces_tags"))
-                    seen_all = set()
-                    for allergen in allergen_values:
-                        a = normalize_tag(allergen) or clean_text(allergen)
-                        if not a or a in seen_all:
-                            continue
-                        seen_all.add(a)
-
-                        if a in cache_allergene:
-                            allergen_id = cache_allergene[a]
-                        else:
-                            allergen_id = get_or_create(cur, "allergene", "allergen_id", "allergens", a)
-                            cache_allergene[a] = allergen_id
-                        if insert_link(cur, "produit_allergene", "allergen_id", code, allergen_id):
-                            stats["links_inserted"] += 1
-
-                    stats["rows_loaded"] += 1
+                record_import_history(
+                    cur,
+                    import_type=import_type,
+                    bronze_key=bronze_key,
+                    silver_key=silver_key,
+                    source_reference=source_reference,
+                    source_start_ts=source_start_ts,
+                    source_end_ts=source_end_ts,
+                    stats=stats,
+                )
     finally:
         conn.close()
 
@@ -630,7 +756,7 @@ def load_dataframe_to_postgres(df: pd.DataFrame, schema_sql_path: str | None = N
         f"rows_skipped_missing_keys={stats['rows_skipped_missing_keys']}, "
         f"products_inserted={stats['products_inserted']}, products_updated={stats['products_updated']}, "
         f"nutrition_inserted={stats['nutrition_inserted']}, nutrition_updated={stats['nutrition_updated']}, "
-        f"links_inserted={stats['links_inserted']}"
+        f"links_inserted={stats['links_inserted']}, products_deleted={stats['products_deleted']}"
     )
     return stats
 
@@ -642,6 +768,11 @@ def load_silver_to_postgres(
     input_key: str,
     input_bucket: str = None,
     schema_sql_path: str | None = None,
+    import_type: str | None = None,
+    bronze_key: str | None = None,
+    source_reference: str | None = None,
+    source_start_ts: int | None = None,
+    source_end_ts: int | None = None,
     **_,
 ):
     """
@@ -654,11 +785,24 @@ def load_silver_to_postgres(
         input_bucket = os.getenv("MINIO_BUCKET_SILVER", "silver")
 
     s3 = get_s3_client()
-    obj = s3.get_object(Bucket=input_bucket, Key=input_key)
-    parquet_bytes = obj["Body"].read()
+    with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp_file:
+        parquet_path = tmp_file.name
 
-    df = pd.read_parquet(BytesIO(parquet_bytes))
-    stats = load_dataframe_to_postgres(df, schema_sql_path=schema_sql_path)
+    try:
+        s3.download_file(input_bucket, input_key, parquet_path)
+        stats = load_parquet_to_postgres(
+            parquet_path,
+            schema_sql_path=schema_sql_path,
+            import_type=clean_optional_text(import_type),
+            bronze_key=clean_optional_text(bronze_key),
+            silver_key=input_key,
+            source_reference=clean_optional_text(source_reference),
+            source_start_ts=clean_optional_bigint(source_start_ts),
+            source_end_ts=clean_optional_bigint(source_end_ts),
+        )
+    finally:
+        if os.path.exists(parquet_path):
+            os.remove(parquet_path)
 
     print(f"Loaded {stats['rows_loaded']} products into PostgreSQL from s3://{input_bucket}/{input_key}")
     return {"loaded_rows": stats["rows_loaded"], "bucket": input_bucket, "key": input_key, **stats}
