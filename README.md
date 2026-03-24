@@ -7,7 +7,7 @@ L'architecture est conteneurisee avec Docker Compose et structuree en couches Br
 
 ## 1. Objectifs
 
-- Extraire un echantillon de produits OpenFoodFacts
+- Extraire les produits OpenFoodFacts Canada depuis les exports officiels
 - Qualifier les donnees avant ingestion (filtres de completude)
 - Standardiser les donnees (normalisation ingredients/categories)
 - Charger un schema PostgreSQL normalise
@@ -29,7 +29,7 @@ Services principaux:
 Vue simplifiee:
 
 ```text
-OpenFoodFacts API
+OpenFoodFacts Official Exports
       |
       v
 Airflow DAG (extract -> upload -> transform -> load)
@@ -47,10 +47,10 @@ Airflow DAG (extract -> upload -> transform -> load)
 ## 3. Architecture Data (Bronze / Silver / Gold)
 
 ### Bronze
-- Source brute extraite depuis OpenFoodFacts
+- Source brute issue du dump complet JSONL ou des delta exports sur 14 jours
 - Format: `JSONL`
 - Emplacement MinIO: bucket `bronze`
-- Script: `dags/scripts/extract_api_sample.py` puis `upload_bronze_to_minio.py`
+- Scripts: `dags/scripts/extract_off_exports.py` puis `upload_bronze_to_minio.py`
 
 ### Silver
 - Transformation/nettoyage + harmonisation des champs
@@ -77,8 +77,13 @@ Ordre des taches:
 4. `load_to_postgres`
 
 Planification:
-- cron: `0 2 * * *`
+- `timedelta(days=14)`
 - `catchup=False`
+
+Strategie d'ingestion:
+- premier chargement: dump complet Open Food Facts
+- runs suivants: delta exports non encore importes
+- refresh complet periodique pour couvrir les suppressions cote source
 
 Fichier DAG:
 - `dags/openfood_pipeline_dag.py`
@@ -127,7 +132,9 @@ Configurer dans `.env` (a partir de `.env.example`):
 - PostgreSQL metier: `POSTGRES_*`
 - Airflow metadata DB: `AIRFLOW_DB*`
 - MinIO: `MINIO_*`
-- Source OpenFoodFacts: `OPENFOOD_API_URL`, `OPENFOOD_COUNTRY`, `SAMPLE_SIZE`
+- Source OpenFoodFacts: `OPENFOOD_COUNTRY`, `OPENFOOD_IMPORT_MODE`, `OPENFOOD_MIN_CORE_NUTRIENTS`
+- URLs exports: `OPENFOOD_FULL_JSONL_URL`, `OPENFOOD_DELTA_INDEX_URL`, `OPENFOOD_DELTA_BASE_URL`
+- Strategie refresh: `OPENFOOD_FULL_REFRESH_INTERVAL_DAYS`, `OPENFOOD_DELTA_RETENTION_DAYS`
 - Airflow core/webserver: `AIRFLOW__*`
 
 ## 10. Lancer et Controler le Pipeline
@@ -138,7 +145,7 @@ Option A (UI Airflow):
 3. Lancer un run manuel
 
 Option B (scheduler):
-- Laisser Airflow executer selon le cron planifie
+- Laisser Airflow executer selon la planification bihebdomadaire
 
 Verifier les sorties:
 - Buckets MinIO `bronze` et `silver`
@@ -149,7 +156,8 @@ Verifier les sorties:
 
 - `docker-compose.yml`
 - `dags/openfood_pipeline_dag.py`
-- `dags/scripts/extract_api_sample.py`
+- `dags/scripts/extract_off_exports.py`
+- `dags/scripts/extract_api_sample.py` (ancien extracteur API conserve comme reference)
 - `dags/scripts/upload_bronze_to_minio.py`
 - `dags/scripts/transform_to_silver.py`
 - `dags/scripts/load_to_postgres.py`
@@ -184,5 +192,5 @@ docker compose down
 
 - Airflow demarre et expose le DAG `openfood_pipeline_canada`
 - MinIO contient les buckets `bronze`, `silver` (`gold` peut etre vide pour l'instant)
-- PostgreSQL contient les tables normalisees et les donnees chargees
+- PostgreSQL contient les tables normalisees, les donnees chargees et l'historique `etl_import_history`
 - Streamlit permet la navigation Dashboard/Admin.
