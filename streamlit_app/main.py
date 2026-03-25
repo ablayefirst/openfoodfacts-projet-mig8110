@@ -50,9 +50,18 @@ def shorten_text(text: str, max_length: int = 30) -> str:
 
 st.set_page_config(page_title="Santé & Nutrition", layout="wide")
 
+st.markdown(
+    """
+    <style>
+    [data-testid="stSidebarNav"] {display: none;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 page = st.sidebar.selectbox(
     "",
-    ["Dashboard", "Mon profil santé", "Admin"],
+    ["Dashboard", "Tendances", "Mon profil santé", "Admin"],
     label_visibility="collapsed"
 )
 
@@ -64,6 +73,13 @@ if "use_health_profile" not in st.session_state:
 # Si admin -> on exécute admin et on stop ici (sinon le dashboard s'affiche aussi)
 if page == "Admin":
     run_admin()
+    st.stop()
+
+if page == "Tendances":
+    try:
+        st.switch_page("pages/02_insights.py")
+    except Exception:
+        st.info("Veuillez ouvrir la page 'Tendances' via le menu latéral.")
     st.stop()
 
 if page == "Mon profil santé":
@@ -97,6 +113,9 @@ if "home_selection" not in st.session_state:
 
 if "page" not in st.session_state:
     st.session_state.page = 1
+
+if "compare_selection" not in st.session_state:
+    st.session_state.compare_selection = []
 
 category_options = ["Toutes"]
 try:
@@ -428,6 +447,18 @@ else:
 
 st.subheader(f"Résultats ({len(df)} produits trouvés)")
 
+selected_codes = st.session_state.compare_selection
+if selected_codes:
+    st.caption(f"Produits sélectionnés pour comparaison : {len(selected_codes)}")
+    if st.button("Comparer les produits sélectionnés"):
+        if len(selected_codes) < 2:
+            st.warning("Sélectionnez au moins 2 produits pour comparer.")
+        else:
+            try:
+                st.switch_page("pages/03_comparateur_produits.py")
+            except Exception:
+                st.info("Ouvrez la page 'Comparateur de produits' via le menu latéral.")
+
 # 2 cartes par ligne
 cols = st.columns(2)
 
@@ -496,19 +527,40 @@ for index, row in df_page.iterrows():
             """,
             unsafe_allow_html=True
         )
+        code_str = str(row["code"])
 
         # Bouton de détail à l'intérieur de la carte
-        if st.button("Détails", key=f"detail_{row['code']}"):
-            st.session_state.selected_code = str(row["code"])
+        if st.button("Détails", key=f"detail_{code_str}"):
+            st.session_state.selected_code = code_str
             try:
-                st.query_params["code"] = str(row["code"])
+                st.query_params["code"] = code_str
             except AttributeError:
-                st.experimental_set_query_params(code=str(row["code"]))
+                st.experimental_set_query_params(code=code_str)
 
             try:
                 st.switch_page("pages/01_detail_produit.py")
             except Exception:
                 st.info("Veuillez ouvrir la page 'Détail du produit' via le menu latéral.")
+
+        # Case à cocher pour sélectionner le produit dans le comparateur
+        compare_selected = code_str in st.session_state.compare_selection
+        new_value = st.checkbox(
+            "Comparer",
+            value=compare_selected,
+            key=f"compare_{code_str}",
+        )
+
+        if new_value and not compare_selected:
+            if len(st.session_state.compare_selection) >= 3:
+                st.warning("Vous ne pouvez comparer que 3 produits à la fois.")
+                # Rétablir l'état de la case à cocher
+                st.session_state[f"compare_{code_str}"] = False
+            else:
+                st.session_state.compare_selection.append(code_str)
+        elif not new_value and compare_selected:
+            st.session_state.compare_selection = [
+                c for c in st.session_state.compare_selection if c != code_str
+            ]
 
 # ==============================
 # ⬅️ ➡️ BOUTONS PAGINATION (sauf accueil aléatoire)
