@@ -9,6 +9,12 @@ import pandas as pd
 from db_connection import get_connection
 from admin import run_admin
 
+from health_profile import (
+    HealthProfile,
+    compute_personalized_scores,
+    show_health_profile_page,
+)
+
 
 def clean_nutrient_series(series: pd.Series, max_reasonable: float) -> pd.Series:
     return series.apply(lambda v: clean_nutrient_value(v, max_reasonable))
@@ -41,17 +47,27 @@ def shorten_text(text: str, max_length: int = 30) -> str:
     return text[: max_length - 1] + "…"
 
 
+
 st.set_page_config(page_title="Santé & Nutrition", layout="wide")
 
 page = st.sidebar.selectbox(
     "",
-    ["Dashboard", "Admin"],
+    ["Dashboard", "Mon profil santé", "Admin"],
     label_visibility="collapsed"
 )
+
+if "health_profile" not in st.session_state:
+    st.session_state.health_profile = None
+if "use_health_profile" not in st.session_state:
+    st.session_state.use_health_profile = False
 
 # Si admin -> on exécute admin et on stop ici (sinon le dashboard s'affiche aussi)
 if page == "Admin":
     run_admin()
+    st.stop()
+
+if page == "Mon profil santé":
+    show_health_profile_page()
     st.stop()
 
 # ==============================
@@ -155,9 +171,33 @@ with col6:
 
 category_detail_filter = st.text_input("Recherche libre dans catégories détaillées (optionnel)")
 
+health_profile = st.session_state.get("health_profile")
+if health_profile is not None:
+    label = (
+        "Voir des alternatives plus saines pour moi"
+        if not st.session_state.use_health_profile
+        else "Désactiver les recommandations personnalisées"
+    )
+    if st.button(label):
+        st.session_state.use_health_profile = not st.session_state.use_health_profile
+    if st.session_state.use_health_profile:
+        st.caption("Tri personnalisé activé en fonction de votre profil santé.")
+else:
+    st.caption(
+        "Définissez votre profil dans la page 'Mon profil santé' pour obtenir des recommandations personnalisées."
+    )
+
 # ==============================
 #  RESET PAGINATION SI FILTRES CHANGENT
 # ==============================
+profile_signature = None
+hp = st.session_state.get("health_profile")
+if isinstance(hp, HealthProfile):
+    profile_signature = (
+        hp.goal,
+        tuple(sorted(hp.constraints or [])),
+    )
+
 current_filters_signature = (
     search_name,
     selected_main_category,
@@ -166,6 +206,8 @@ current_filters_signature = (
     sort_option,
     sort_order,
     category_detail_filter,
+    st.session_state.get("use_health_profile", False),
+    profile_signature,
 )
 
 if "last_filters_signature" not in st.session_state:
@@ -307,6 +349,20 @@ elif sort_option == "Sucre (g/100g)":
     df = df.sort_values(by="sugars_clean", ascending=ascending, na_position="last")
 elif sort_option == "Sel (g/100g)":
     df = df.sort_values(by="salt_clean", ascending=ascending, na_position="last")
+    
+health_profile = st.session_state.get("health_profile")
+use_health_profile = st.session_state.get("use_health_profile", False)
+
+if use_health_profile and health_profile is not None and not df.empty:
+    try:
+        personalized_scores = compute_personalized_scores(df, health_profile)
+        df = (
+            df.assign(_personal_score=personalized_scores)
+            .sort_values(by="_personal_score", ascending=False)
+            .drop(columns="_personal_score")
+        )
+    except Exception as e:
+        st.warning(f"Impossible d'appliquer le tri personnalisé : {e}")
 
 # ==============================
 #  PAGINATION
@@ -324,21 +380,26 @@ if is_home:
         if df.empty:
             st.session_state.home_selection = df.copy()
         else:
-            mask_img = df["image_url"].notna() & df["image_url"].astype(str).str.strip().ne("")
-            df_with_img = df[mask_img]
-
-            if len(df_with_img) >= 10:
-                selection = df_with_img.sample(10, random_state=random.randint(0, 1_000_000))
+            # Si le tri personnalisé est activé, on propose directement
+            # les meilleurs produits pour l'utilisateur, sans échantillon aléatoire
+            if st.session_state.get("use_health_profile", False) and st.session_state.get("health_profile") is not None:
+                selection = df.head(10)
             else:
-                df_without_img = df[~mask_img]
-                needed = max(0, 10 - len(df_with_img))
-                extras = pd.DataFrame()
-                if needed > 0 and len(df_without_img) > 0:
-                    extras = df_without_img.sample(
-                        min(needed, len(df_without_img)),
-                        random_state=random.randint(0, 1_000_000),
-                    )
-                selection = pd.concat([df_with_img, extras]).head(10)
+                mask_img = df["image_url"].notna() & df["image_url"].astype(str).str.strip().ne("")
+                df_with_img = df[mask_img]
+
+                if len(df_with_img) >= 10:
+                    selection = df_with_img.sample(10, random_state=random.randint(0, 1_000_000))
+                else:
+                    df_without_img = df[~mask_img]
+                    needed = max(0, 10 - len(df_with_img))
+                    extras = pd.DataFrame()
+                    if needed > 0 and len(df_without_img) > 0:
+                        extras = df_without_img.sample(
+                            min(needed, len(df_without_img)),
+                            random_state=random.randint(0, 1_000_000),
+                        )
+                    selection = pd.concat([df_with_img, extras]).head(10)
 
             st.session_state.home_selection = selection.reset_index(drop=True)
 
