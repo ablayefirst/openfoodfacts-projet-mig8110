@@ -3,8 +3,27 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from db_connection import get_connection
 
-st.set_page_config(page_title="Insights", layout="wide")
-st.title("📊 Insights – OpenFoodFacts Canada")
+st.set_page_config(page_title="Tendances", layout="wide")
+
+st.markdown(
+    """
+    <style>
+    [data-testid="stSidebarNav"] {display: none;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+if st.button("Retour au Dashboard"):
+    st.switch_page("main.py")
+
+st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
+
+st.title("Tendances des données – OpenFoodFacts Canada")
+
+st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
+
 
 # ---------- DB helper ----------
 def run_query(sql: str, params=None):
