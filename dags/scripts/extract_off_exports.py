@@ -30,6 +30,13 @@ DOWNLOAD_CHUNK_SIZE = 8 * 1024 * 1024
 DOWNLOAD_MAX_ATTEMPTS = 8
 
 
+def env_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value.strip() == "":
+        return default
+    return int(raw_value)
+
+
 def not_empty(obj: dict[str, Any], key: str) -> bool:
     value = obj.get(key)
     return value is not None and str(value).strip() != ""
@@ -89,18 +96,18 @@ def parse_args():
     parser.add_argument(
         "--min-core-nutrients",
         type=int,
-        default=int(os.getenv("OPENFOOD_MIN_CORE_NUTRIENTS", "2")),
+        default=env_int("OPENFOOD_MIN_CORE_NUTRIENTS", 2),
         help="Minimum number of core nutrients present among energy/sugars/fat/salt (0 disables filter).",
     )
     parser.add_argument(
         "--full-refresh-interval-days",
         type=int,
-        default=int(os.getenv("OPENFOOD_FULL_REFRESH_INTERVAL_DAYS", "56")),
+        default=env_int("OPENFOOD_FULL_REFRESH_INTERVAL_DAYS", 56),
     )
     parser.add_argument(
         "--delta-retention-days",
         type=int,
-        default=int(os.getenv("OPENFOOD_DELTA_RETENTION_DAYS", "14")),
+        default=env_int("OPENFOOD_DELTA_RETENTION_DAYS", 14),
     )
     parser.add_argument(
         "--full-jsonl-url",
@@ -113,6 +120,12 @@ def parse_args():
     parser.add_argument(
         "--delta-base-url",
         default=os.getenv("OPENFOOD_DELTA_BASE_URL", DEFAULT_DELTA_BASE_URL),
+    )
+    parser.add_argument(
+        "--max-rows",
+        type=int,
+        default=env_int("OPENFOOD_MAX_ROWS", 500),
+        help="Maximum number of filtered rows to keep (0 disables the limit).",
     )
     return parser.parse_args()
 
@@ -197,8 +210,9 @@ def get_import_state() -> dict[str, Any]:
         "last_full_at": None,
         "last_delta_end_ts": None,
     }
-    conn = get_pg_connection()
+    conn = None
     try:
+        conn = get_pg_connection()
         with conn:
             with conn.cursor() as cur:
                 ensure_import_history_table(cur)
@@ -235,8 +249,15 @@ def get_import_state() -> dict[str, Any]:
                 )
                 row = cur.fetchone()
                 state["last_delta_end_ts"] = row[0] if row and row[0] is not None else None
+    except psycopg2.Error as exc:
+        print(
+            "Warning: unable to read import state from PostgreSQL. "
+            f"Falling back to a first-run state for this extraction. Error: {exc}"
+        )
+        return state
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
     return state
 
@@ -378,14 +399,14 @@ def open_local_text_stream(path: Path):
         return gzip.open(path, "rt", encoding="utf-8", errors="replace")
     return path.open("r", encoding="utf-8", errors="replace")
 
-
 def process_local_export_file(
     source_path: Path,
     output_handle,
     country: str,
     min_core_nutrients: int,
     stats: dict[str, int],
-) -> None:
+    max_rows: int | None = None,
+) -> bool:
     with open_local_text_stream(source_path) as stream:
         for raw_line in stream:
             line = raw_line.strip()
@@ -421,6 +442,9 @@ def process_local_export_file(
 
             output_handle.write(json.dumps(product, ensure_ascii=False) + "\n")
             stats["rows_kept"] += 1
+            if max_rows is not None and stats["rows_kept"] >= max_rows:
+                return True
+    return False
 
 
 def filter_product(product: dict[str, Any], country: str, min_core_nutrients: int) -> str | None:
@@ -443,8 +467,11 @@ def stream_export_to_jsonl(
     output_path: Path,
     country: str,
     min_core_nutrients: int,
+    max_rows: int | None = None,
 ) -> dict[str, int]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if max_rows is not None and max_rows <= 0:
+        max_rows = None
 
     stats = {
         "files_downloaded": 0,
@@ -462,14 +489,17 @@ def stream_export_to_jsonl(
         for index, source_url in enumerate(source_urls, start=1):
             download_path = build_download_cache_path(output_path, source_url, index=index)
             local_source = download_source_file(session, source_url, download_path)
-            process_local_export_file(
+            limit_reached = process_local_export_file(
                 source_path=local_source,
                 output_handle=handle,
                 country=country,
                 min_core_nutrients=min_core_nutrients,
                 stats=stats,
+                max_rows=max_rows,
             )
             stats["files_downloaded"] += 1
+            if limit_reached:
+                break
 
     return stats
 
@@ -521,20 +551,25 @@ def extract_official_exports(
     full_jsonl_url: str | None = None,
     delta_index_url: str | None = None,
     delta_base_url: str | None = None,
+    max_rows: int | None = None,
     **_,
 ) -> dict[str, Any]:
     if min_core_nutrients is None:
-        min_core_nutrients = int(os.getenv("OPENFOOD_MIN_CORE_NUTRIENTS", "2"))
+        min_core_nutrients = env_int("OPENFOOD_MIN_CORE_NUTRIENTS", 2)
     if full_refresh_interval_days is None:
-        full_refresh_interval_days = int(os.getenv("OPENFOOD_FULL_REFRESH_INTERVAL_DAYS", "56"))
+        full_refresh_interval_days = env_int("OPENFOOD_FULL_REFRESH_INTERVAL_DAYS", 56)
     if delta_retention_days is None:
-        delta_retention_days = int(os.getenv("OPENFOOD_DELTA_RETENTION_DAYS", "14"))
+        delta_retention_days = env_int("OPENFOOD_DELTA_RETENTION_DAYS", 14)
     if full_jsonl_url is None:
         full_jsonl_url = os.getenv("OPENFOOD_FULL_JSONL_URL", DEFAULT_FULL_JSONL_URL)
     if delta_index_url is None:
         delta_index_url = os.getenv("OPENFOOD_DELTA_INDEX_URL", DEFAULT_DELTA_INDEX_URL)
     if delta_base_url is None:
         delta_base_url = os.getenv("OPENFOOD_DELTA_BASE_URL", DEFAULT_DELTA_BASE_URL)
+    if max_rows is None:
+        max_rows = env_int("OPENFOOD_MAX_ROWS", 500)
+    if max_rows <= 0:
+        max_rows = None
 
     now_utc = datetime.now(timezone.utc)
     import_state = get_import_state()
@@ -558,6 +593,7 @@ def extract_official_exports(
             output_path=output_path,
             country=country,
             min_core_nutrients=min_core_nutrients,
+            max_rows=max_rows,
         )
         metadata = {
             "import_type": "full",
@@ -587,6 +623,7 @@ def extract_official_exports(
             output_path=output_path,
             country=country,
             min_core_nutrients=min_core_nutrients,
+            max_rows=max_rows,
         )
         metadata = {
             "import_type": "delta",
@@ -624,6 +661,7 @@ def main():
         full_jsonl_url=args.full_jsonl_url,
         delta_index_url=args.delta_index_url,
         delta_base_url=args.delta_base_url,
+        max_rows=args.max_rows,
     )
 
 

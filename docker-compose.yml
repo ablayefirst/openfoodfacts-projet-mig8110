@@ -35,6 +35,7 @@ x-airflow-common: &airflow-common
     OPENFOOD_COUNTRY: ${OPENFOOD_COUNTRY}
     OPENFOOD_IMPORT_MODE: ${OPENFOOD_IMPORT_MODE}
     OPENFOOD_MIN_CORE_NUTRIENTS: ${OPENFOOD_MIN_CORE_NUTRIENTS}
+    OPENFOOD_MAX_ROWS: ${OPENFOOD_MAX_ROWS}
     OPENFOOD_FULL_REFRESH_INTERVAL_DAYS: ${OPENFOOD_FULL_REFRESH_INTERVAL_DAYS}
     OPENFOOD_DELTA_RETENTION_DAYS: ${OPENFOOD_DELTA_RETENTION_DAYS}
     OPENFOOD_FULL_JSONL_URL: ${OPENFOOD_FULL_JSONL_URL}
@@ -148,6 +149,8 @@ services:
           --password admin123 || true
     restart: "no"
     depends_on:
+      postgres:
+        condition: service_healthy
       airflow-postgres:
         condition: service_healthy
       minio-init:
