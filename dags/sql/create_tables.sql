@@ -126,12 +126,34 @@ CREATE TABLE IF NOT EXISTS etl_import_history (
 -- INDEX POUR PERFORMANCE (APP WEB + ETL)
 -- =====================================================
 
-CREATE INDEX IF NOT EXISTS idx_produit_nom ON produit(nom_produit);
-CREATE INDEX IF NOT EXISTS idx_categorie_nom ON categorie(categorie);
-CREATE INDEX IF NOT EXISTS idx_ingredient_nom ON ingredient(ingredients_nom);
-CREATE INDEX IF NOT EXISTS idx_allergene_nom ON allergene(allergens);
-CREATE INDEX IF NOT EXISTS idx_label_nom ON label(labels);
-CREATE INDEX IF NOT EXISTS idx_marque_nom ON marque(brands);
-CREATE INDEX IF NOT EXISTS idx_pays_nom ON pays(countries_en);
+-- Cleanup for databases created with older schema versions.
+-- UNIQUE constraints already create indexes for marque, pays, ingredient,
+-- allergene and label, so explicit duplicates are unnecessary.
+DROP INDEX IF EXISTS idx_produit_nom;
+DROP INDEX IF EXISTS idx_categorie_nom;
+DROP INDEX IF EXISTS idx_ingredient_nom;
+DROP INDEX IF EXISTS idx_allergene_nom;
+DROP INDEX IF EXISTS idx_label_nom;
+DROP INDEX IF EXISTS idx_marque_nom;
+DROP INDEX IF EXISTS idx_pays_nom;
+
+-- Trigram indexes speed up case-insensitive substring searches used by
+-- Streamlit filters such as LOWER(column) LIKE LOWER('%...%').
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+CREATE INDEX IF NOT EXISTS idx_produit_nom_trgm
+ON produit USING gin (LOWER(nom_produit) gin_trgm_ops);
+
+CREATE INDEX IF NOT EXISTS idx_categorie_nom_trgm
+ON categorie USING gin (LOWER(categorie) gin_trgm_ops);
+
+CREATE INDEX IF NOT EXISTS idx_produit_categorie_principale_trgm
+ON produit USING gin (LOWER(COALESCE(categorie_principale, '')) gin_trgm_ops);
+
+-- This helps nutrition-based filtering and insights aggregations.
+CREATE INDEX IF NOT EXISTS idx_valeurs_nutritionnelles_sugars
+ON valeurs_nutritionnelles(sugars_100g)
+WHERE sugars_100g IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_etl_import_history_imported_at ON etl_import_history(imported_at);
 CREATE INDEX IF NOT EXISTS idx_etl_import_history_type_end_ts ON etl_import_history(import_type, source_end_ts);
