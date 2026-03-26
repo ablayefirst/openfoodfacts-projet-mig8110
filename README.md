@@ -136,7 +136,7 @@ Les index créés automatiquement sont les suivants:
 - `idx_marque_nom`
 - `idx_pays_nom`
 - `idx_etl_import_history_imported_at`
-- `idx_etl_import_history_type_end_ts`
+- `idx_etl_import_history_type_end_ts` 
 
 ## 6. Application Streamlit
 
