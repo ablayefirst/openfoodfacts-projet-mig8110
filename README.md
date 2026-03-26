@@ -40,6 +40,10 @@ Vue simplifiée:
 ```text
 OpenFoodFacts Official Exports
       |
+      +--> Full dump (full)
+      |
+      +--> Delta exports (delta)
+      |
       v
 Airflow DAG (extract -> upload -> transform -> load)
       |                         |
