@@ -1,35 +1,44 @@
 # OpenFoodFacts Data Platform (MIG8110)
 
-## Application web d'exploration et de comparaison nutritionnelle des produits alimentaires vendus au Canada
+## Plateforme data OpenFoodFacts Canada avec pipeline ETL, entreposage objet et exploration Streamlit
 
-Plateforme data pour OpenFoodFacts Canada avec pipeline ETL Airflow, stockage MinIO, chargement PostgreSQL et interface Streamlit.
-L'architecture est conteneurisee avec Docker Compose et structuree en couches Bronze/Silver (Gold reserve pour la suite).
+Ce projet met en place une chaîne de traitement de données autour des exports OpenFoodFacts Canada:
+
+- extraction des exports officiels OpenFoodFacts
+- dépôt des données brutes dans MinIO
+- transformation et normalisation en couche Silver
+- chargement dans PostgreSQL
+- exploration et administration via une application Streamlit
+
+L'architecture est orchestrée avec Docker Compose et Airflow. La couche Silver est maintenue au format `Parquet`.
 
 ## 1. Objectifs
 
-- Extraire un echantillon de produits OpenFoodFacts
-- Qualifier les donnees avant ingestion (filtres de completude)
-- Standardiser les donnees (normalisation ingredients/categories)
-- Charger un schema PostgreSQL normalise
-- Permettre l'exploration metier via une application Streamlit
+- Extraire les produits OpenFoodFacts Canada depuis les exports officiels
+- Contrôler la qualité minimale des données avant ingestion
+- Normaliser certains champs métier, notamment les catégories
+- Charger un schéma PostgreSQL normalisé
+- Améliorer les performances de consultation avec des index SQL
+- Offrir une interface Streamlit pour la recherche, l'analyse et la comparaison de produits
 
-## 2. Architecture Technique (Docker)
+## 2. Architecture Technique
 
-Tous les composants sont definis dans `docker-compose.yml`.
+Tous les composants sont définis dans `docker-compose.yml`.
 
 Services principaux:
-- `postgres` (PostgreSQL metier)
-- `airflow-postgres` (base metadata Airflow)
-- `minio` + `minio-init` (stockage S3-compatible + creation des buckets)
-- `airflow-webserver`, `airflow-scheduler`, `airflow-init`
-- `streamlit-app`
-- `adminer`
-- `jupyter`
 
-Vue simplifiee:
+- `postgres` : base métier PostgreSQL
+- `airflow-postgres` : base de métadonnées Airflow
+- `minio` et `minio-init` : stockage objet S3-compatible et initialisation des buckets
+- `airflow-webserver`, `airflow-scheduler`, `airflow-init` : orchestration ETL
+- `streamlit-app` : interface utilisateur principale
+- `adminer` : exploration de la base
+- `jupyter` : exploration et prototypage
+
+Vue simplifiée:
 
 ```text
-OpenFoodFacts API
+OpenFoodFacts Official Exports
       |
       v
 Airflow DAG (extract -> upload -> transform -> load)
@@ -38,74 +47,125 @@ Airflow DAG (extract -> upload -> transform -> load)
       +--> MinIO bronze (JSONL)
                                 |
                                 v
-                          PostgreSQL (schema normalise)
+                          PostgreSQL (schéma normalisé + index)
                                 |
                                 v
-                         Streamlit (Dashboard + Admin)
+                      Streamlit (dashboard, insights, admin)
 ```
 
-## 3. Architecture Data (Bronze / Silver / Gold)
+## 3. Architecture Data
 
 ### Bronze
-- Source brute extraite depuis OpenFoodFacts
+
+- Données brutes issues du dump complet ou des delta exports
 - Format: `JSONL`
-- Emplacement MinIO: bucket `bronze`
-- Script: `dags/scripts/extract_api_sample.py` puis `upload_bronze_to_minio.py`
+- Bucket MinIO: `bronze`
+- Scripts principaux:
+  - `dags/scripts/extract_off_exports.py`
+  - `dags/scripts/upload_bronze_to_minio.py`
 
 ### Silver
-- Transformation/nettoyage + harmonisation des champs
-- Normalisation via regles YAML: `config/normalization_rules.yml`
-- Format: `Parquet`
-- Emplacement MinIO: bucket `silver`
-- Script: `dags/scripts/transform_to_silver.py`
 
-### Gold
-- Bucket reserve pour une couche metier enrichie (non alimentee pour l'instant)
-- Le pipeline actuel charge la sortie Silver directement dans PostgreSQL
-- Creation schema via SQL avant chargement
-- Script: `dags/scripts/load_to_postgres.py`
-- SQL schema: `dags/sql/create_tables.sql`
+- Nettoyage, harmonisation et enrichissement des champs
+- Normalisation pilotée par `config/normalization_rules.yml`
+- Format conservé: `Parquet`
+- Bucket MinIO: `silver`
+- Script principal:
+  - `dags/scripts/transform_to_silver.py`
+
+### Chargement PostgreSQL
+
+- La sortie Silver est chargée dans PostgreSQL
+- Le schéma relationnel est créé si nécessaire avant chargement
+- L'historique des imports est stocké dans `etl_import_history`
+- Des index sont créés pour accélérer les recherches et certains usages analytiques
+- Fichiers principaux:
+  - `dags/scripts/load_to_postgres.py`
+  - `dags/sql/create_tables.sql`
+  - `dags/sql/explain_indexes.sql`
 
 ## 4. Pipeline Airflow
 
-DAG: `openfood_pipeline_canada`
+Le DAG principal est `openfood_pipeline_canada`.
 
-Ordre des taches:
+Ordre des tâches:
+
 1. `extract_products`
 2. `upload_to_minio`
 3. `transform_to_silver`
 4. `load_to_postgres`
 
-Planification:
-- cron: `0 2 * * *`
+Planification actuelle:
+
+- `timedelta(days=14)`
 - `catchup=False`
 
+Stratégie d'ingestion:
+
+- premier chargement: dump complet OpenFoodFacts
+- chargements suivants: delta exports non encore importés
+- rafraîchissement complet périodique pour couvrir les suppressions côté source
+
 Fichier DAG:
+
 - `dags/openfood_pipeline_dag.py`
 
-## 5. Application Streamlit
+## 5. Base PostgreSQL
 
-Point d'entree:
+Le schéma SQL couvre les entités principales du domaine produit et les tables d'association nécessaires.
+
+Le chargement alimente notamment:
+
+- `produit`
+- `valeurs_nutritionnelles`
+- `categorie`
+- `ingredient`
+- `marque`
+- `allergene`
+- `label`
+- `pays`
+- `etl_import_history`
+
+Les index créés automatiquement sont les suivants:
+
+- `idx_produit_nom`
+- `idx_categorie_nom`
+- `idx_ingredient_nom`
+- `idx_allergene_nom`
+- `idx_label_nom`
+- `idx_marque_nom`
+- `idx_pays_nom`
+- `idx_etl_import_history_imported_at`
+- `idx_etl_import_history_type_end_ts` 
+
+## 6. Application Streamlit
+
+Point d'entrée:
+
 - `streamlit_app/main.py`
 
-Fonctionnalites:
-- Dashboard nutrition (recherche, filtres, tri)
-- Filtre categorie principale et categorie detaillee
-- Visualisation de produits + details
-- Module Admin integre (CRUD produits et relations)
+Fonctionnalités disponibles:
 
-Composants:
-- `streamlit_app/main.py` (dashboard)
-- `streamlit_app/admin.py` (admin)
-- `streamlit_app/pages/01_detail_produit.py`
-- `streamlit_app/pages/02_insights.py`
+- recherche par nom de produit
+- filtre par catégorie principale
+- recherche libre dans les catégories détaillées
+- filtre NutriScore
+- filtre sur le sucre
+- tri par NutriScore, sucre ou sel
+- page de détail produit
+- page de tendances
+- comparateur de produits
+- profil santé avec recommandations personnalisées
+- module d'administration CRUD
 
-## 6. Prerequis
+## 7. Prérequis
 
-- Docker + Docker Compose
+- Docker et Docker Compose
 - Git
 
-## 7. Demarrage Rapide
+## 8. Démarrage Rapide
+
+Depuis la racine du projet:
 
 ```bash
 cp .env.example .env
@@ -113,76 +173,33 @@ docker compose up -d --build
 docker compose ps
 ```
 
-## 8. Acces aux Services
+Une fois la stack démarrée:
+
+1. Ouvrir Airflow
+2. Vérifier que le DAG `openfood_pipeline_canada` est visible
+3. Lancer un run manuel si nécessaire
+4. Ouvrir Streamlit pour consulter les données chargées
+
+## 9. Accès aux Services
 
 - Streamlit: http://localhost:8501
-- Airflow: http://localhost:8080 (admin / admin123)
+- Airflow: http://localhost:8080 `admin` / `admin123`
 - Adminer: http://localhost:8081
-- MinIO Console: http://localhost:9001 (minioadmin / minioadmin123)
-- JupyterLab: http://localhost:8888 (token: openfood2024)
+- MinIO API: http://localhost:9000
+- MinIO Console: http://localhost:9001
+- JupyterLab: http://localhost:8888
 
-## 9. Variables d'Environnement Importantes
+Identifiants par défaut utiles:
 
-Configurer dans `.env` (a partir de `.env.example`):
-- PostgreSQL metier: `POSTGRES_*`
-- Airflow metadata DB: `AIRFLOW_DB*`
-- MinIO: `MINIO_*`
-- Source OpenFoodFacts: `OPENFOOD_API_URL`, `OPENFOOD_COUNTRY`, `SAMPLE_SIZE`
-- Airflow core/webserver: `AIRFLOW__*`
+- MinIO: `minioadmin` / `minioadmin123`
+- Jupyter token: `openfood2024`
+- Admin Streamlit: `admin` / `admin123` si `ADMIN_USER` et `ADMIN_PASSWORD` ne sont pas définis
 
-## 10. Lancer et Controler le Pipeline
+## 10. État Attendu du Projet
 
-Option A (UI Airflow):
-1. Ouvrir Airflow
-2. Activer le DAG `openfood_pipeline_canada`
-3. Lancer un run manuel
-
-Option B (scheduler):
-- Laisser Airflow executer selon le cron planifie
-
-Verifier les sorties:
-- Buckets MinIO `bronze` et `silver`
-- Tables PostgreSQL alimentees
-- Donnees visibles dans Streamlit
-
-## 11. Arborescence Recommandee a Connaitre
-
-- `docker-compose.yml`
-- `dags/openfood_pipeline_dag.py`
-- `dags/scripts/extract_api_sample.py`
-- `dags/scripts/upload_bronze_to_minio.py`
-- `dags/scripts/transform_to_silver.py`
-- `dags/scripts/load_to_postgres.py`
-- `config/normalization_rules.yml`
-- `dags/sql/create_tables.sql`
-- `streamlit_app/main.py`
-- `streamlit_app/admin.py`
-
-## 12. Troubleshooting
-
-Verifier l'etat:
-```bash
-docker compose ps
-```
-
-Suivre les logs:
-```bash
-docker compose logs -f airflow-webserver airflow-scheduler streamlit-app
-```
-
-Redemarrer un service:
-```bash
-docker compose restart <service>
-```
-
-Arreter la stack:
-```bash
-docker compose down
-```
-
-## 13. Etat Attendu du Livrable
-
-- Airflow demarre et expose le DAG `openfood_pipeline_canada`
-- MinIO contient les buckets `bronze`, `silver` (`gold` peut etre vide pour l'instant)
-- PostgreSQL contient les tables normalisees et les donnees chargees
-- Streamlit permet la navigation Dashboard/Admin.
+- Airflow démarre et expose le DAG `openfood_pipeline_canada`
+- MinIO contient les buckets `bronze`, `silver` et `gold` initialisés
+- la couche `silver` est stockée en `Parquet`
+- PostgreSQL contient les tables normalisées et `etl_import_history`
+- les index SQL sont créés
+- Streamlit permet la navigation entre dashboard, tendances, comparaison, profil santé et administration

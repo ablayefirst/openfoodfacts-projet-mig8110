@@ -6,7 +6,25 @@ from db_connection import get_connection
 
 st.set_page_config(page_title="Détail produit", layout="wide")
 
+st.markdown(
+    """
+    <style>
+    [data-testid="stSidebarNav"] {display: none;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+
+if st.button("Retour au Dashboard"):
+    st.switch_page("main.py")
+
+st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
+
 st.title("Détail du produit")
+
+st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
 
 conn = get_connection()
 
@@ -29,31 +47,13 @@ if isinstance(query_code, list):
     query_code = query_code[0] if query_code else None
 
 if code is None and query_code is not None:
-    code = str(query_code).strip()
+    code = str(query_code).strip() or None
     if code:
         st.session_state.selected_code = code
-    else:
-        code = None
 
 if code is None:
-    fallback_sql = """
-    SELECT code_produit
-    FROM produit
-    WHERE image_url IS NOT NULL AND TRIM(image_url) <> ''
-    LIMIT 1
-    """
-    fallback_df = pd.read_sql(fallback_sql, conn)
-
-    if fallback_df.empty:
-        fallback_df = pd.read_sql("SELECT code_produit FROM produit LIMIT 1", conn)
-
-    if fallback_df.empty:
-        st.error("Aucun produit disponible dans la base.")
-        st.stop()
-
-    code = str(fallback_df.iloc[0]["code_produit"]).strip()
-    st.session_state.selected_code = code
-    st.info("Aucun produit sélectionné. Affichage du premier produit disponible.")
+    st.info("Aucun produit n'a été sélectionné. Retournez au dashboard et cliquez sur le bouton 'Détails' d'un produit.")
+    st.stop()
 
 query_code_str = str(query_code) if query_code is not None else None
 
@@ -76,8 +76,6 @@ SELECT
     p.url,
     p.image_url,
     p.image_small_url,
-    p.image_ingredients_url,
-    p.image_ingredients_small_url,
     p.image_nutrition_url,
     m.brands AS brand,
     COALESCE(string_agg(DISTINCT c.categorie, ', '), 'Non spécifiée') AS categories,
@@ -110,7 +108,6 @@ GROUP BY
     p.code_produit, p.nom_produit, p.categorie_principale, p.quantite,
     p.nutrition_grade, p.nutriscore_score, p.nova_group,
     p.url, p.image_url, p.image_small_url,
-    p.image_ingredients_url, p.image_ingredients_small_url,
     p.image_nutrition_url,
     m.brands,
     v.saturated_fat_100g, v.sugars_100g, v.fiber_100g,
