@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from db_connection import get_connection
-from health_profile import HealthProfile, compute_personalized_scores
+from health_logic import HealthProfile, compute_personalized_scores
 
 
 st.set_page_config(page_title="Comparateur de produits", layout="wide")
