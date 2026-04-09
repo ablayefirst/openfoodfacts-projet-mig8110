@@ -21,6 +21,7 @@ if DAGS_PATH not in sys.path:
 
 from scripts.extract_off_exports import extract_official_exports
 from scripts.first_clean_from_bronze import first_clean_from_bronze
+from scripts.build_similarity import build_similarity_recommendations
 from scripts.load_to_postgres import load_silver_to_postgres
 from scripts.merge_final_clean import merge_final_clean
 from scripts.second_clean_from_bad import second_clean_from_bad
@@ -121,4 +122,9 @@ with DAG(
         },
     )
 
-    extract_task >> upload_task >> first_clean_task >> second_clean_task >> merge_task >> load_task
+    build_similarity_task = PythonOperator(
+        task_id="build_similarity_recommendations",
+        python_callable=build_similarity_recommendations,
+    )
+
+    extract_task >> upload_task >> first_clean_task >> second_clean_task >> merge_task >> load_task >> build_similarity_task
