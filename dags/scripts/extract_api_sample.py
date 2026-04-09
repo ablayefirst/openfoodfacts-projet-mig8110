@@ -221,7 +221,7 @@ def main():
     )
 
 def extract_sample(
-    limit: int = 500,
+    limit: int = 100,
     output_dir: str = "/opt/airflow/data",
     country: str = "canada",
     min_core_nutrients: int | None = None,
