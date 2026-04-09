@@ -81,6 +81,14 @@ CREATE TABLE IF NOT EXISTS produit_categorie (
     PRIMARY KEY (code_produit, id_categorie)
 );
 
+
+CREATE TABLE synonyme_ingredient (
+    id_synonyme SERIAL PRIMARY KEY,
+    nom_synonyme TEXT,
+    id_ingredient INT REFERENCES ingredient(id_ingredient)
+);
+
+
 CREATE TABLE IF NOT EXISTS produit_ingredient (
     code_produit TEXT REFERENCES produit(code_produit) ON DELETE CASCADE,
     id_ingredient INTEGER REFERENCES ingredient(id_ingredient) ON DELETE CASCADE,

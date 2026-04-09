@@ -552,9 +552,8 @@ for index, row in df_page.iterrows():
 
         if new_value and not compare_selected:
             if len(st.session_state.compare_selection) >= 3:
-                st.warning("Vous ne pouvez comparer que 3 produits à la fois.")
-                # Rétablir l'état de la case à cocher
-                st.session_state[f"compare_{code_str}"] = False
+                # On n'ajoute pas le produit et on affiche seulement un message informatif
+                st.info("Vous ne pouvez comparer que 3 produits à la fois. Décochez un produit avant d'en ajouter un autre.")
             else:
                 st.session_state.compare_selection.append(code_str)
         elif not new_value and compare_selected:
