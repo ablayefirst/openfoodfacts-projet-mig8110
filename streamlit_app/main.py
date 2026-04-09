@@ -13,10 +13,17 @@ Ce module gère :
 import os
 import math
 import random
+import sys
 import warnings
+from pathlib import Path
 
 import streamlit as st
 import pandas as pd
+
+# Ensure local Streamlit modules are importable regardless of launch directory.
+APP_DIR = Path(__file__).resolve().parent
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
 
 from db_connection import get_connection
 from admin import run_admin

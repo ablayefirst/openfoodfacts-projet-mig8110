@@ -1,7 +1,13 @@
+import sys
 import warnings
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+
+APP_DIR = Path(__file__).resolve().parents[1]
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
 
 from db_connection import get_connection
 from health_logic import HealthProfile, compute_personalized_scores

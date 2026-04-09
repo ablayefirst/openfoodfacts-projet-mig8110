@@ -1,10 +1,17 @@
+import os
+
 import pandas as pd
 from sqlalchemy import create_engine, text
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 
-DATABASE_URL = "postgresql+psycopg://postgres:postgres123@postgres:5432/openfood_db"
-print("DATABASE_URL utilisée = postgresql+psycopg://postgres:***@postgres:5432/openfood_db")
+
+def get_database_url() -> str:
+    driver = os.getenv("POSTGRES_SQLALCHEMY_DRIVER", "postgresql+psycopg2")
+    host = os.getenv("POSTGRES_HOST", "postgres")
+    port = os.getenv("POSTGRES_PORT", "5432")
+    db = os.getenv("POSTGRES_DB", "openfood_db")
+    user = os.getenv("POSTGRES_USER", "postgres")
+    password = os.getenv("POSTGRES_PASSWORD", "postgres123")
+    return f"{driver}://{user}:{password}@{host}:{port}/{db}"
 
 # ==============================
 # 1. Charger produits
@@ -474,12 +481,53 @@ def jaccard(a, b):
     return len(a & b) / len(a | b)
 
 
+def ensure_similarity_table(conn) -> None:
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS produit_similaire (
+                code_produit_source TEXT REFERENCES produit(code_produit) ON DELETE CASCADE,
+                code_produit_cible TEXT REFERENCES produit(code_produit) ON DELETE CASCADE,
+                type_recommandation TEXT NOT NULL,
+                score_similarite NUMERIC,
+                nb_ingredients_communs INTEGER,
+                ingredients_communs TEXT,
+                methode TEXT,
+                health_score_source NUMERIC,
+                health_score_cible NUMERIC,
+                PRIMARY KEY (code_produit_source, code_produit_cible, type_recommandation)
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_produit_similaire_source_type
+            ON produit_similaire(code_produit_source, type_recommandation)
+            """
+        )
+    )
+
+
 # ==============================
 # 3. Main
 # ==============================
 
-def main():
-    engine = create_engine(DATABASE_URL)
+def build_similarity_recommendations(**_):
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    database_url = get_database_url()
+    print(
+        "DATABASE_URL utilisée = "
+        f"{os.getenv('POSTGRES_SQLALCHEMY_DRIVER', 'postgresql+psycopg2')}://"
+        f"{os.getenv('POSTGRES_USER', 'postgres')}:***@"
+        f"{os.getenv('POSTGRES_HOST', 'postgres')}:"
+        f"{os.getenv('POSTGRES_PORT', '5432')}/"
+        f"{os.getenv('POSTGRES_DB', 'openfood_db')}"
+    )
+    engine = create_engine(database_url)
 
     df = pd.read_sql(QUERY, engine)
 
@@ -493,6 +541,15 @@ def main():
     df = df[df["ingredients_clean"].apply(len) > 0].reset_index(drop=True)
 
     print("Produits utilisés :", len(df))
+
+    with engine.begin() as conn:
+        ensure_similarity_table(conn)
+
+    if len(df) < 2:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM produit_similaire"))
+        print("Pas assez de produits avec ingrédients pour générer des recommandations.")
+        return {"rows_products": int(len(df)), "rows_recommendations": 0}
 
     # ==============================
     # 5. Vectorisation TF-IDF
@@ -664,20 +721,26 @@ def main():
     # 10. Insertion en base
     # ==============================
 
-    print("Colonnes result_df :", result_df.columns.tolist())
-    print(result_df[[
-        "code_produit_source",
-        "code_produit_cible",
-        "type_recommandation",
-        "health_score_source",
-        "health_score_cible"
-    ]].head(10))
-
     with engine.begin() as conn:
+        ensure_similarity_table(conn)
         conn.execute(text("DELETE FROM produit_similaire"))
-        result_df.to_sql("produit_similaire", conn, if_exists="append", index=False)
+        if not result_df.empty:
+            print("Colonnes result_df :", result_df.columns.tolist())
+            print(result_df[[
+                "code_produit_source",
+                "code_produit_cible",
+                "type_recommandation",
+                "health_score_source",
+                "health_score_cible"
+            ]].head(10))
+            result_df.to_sql("produit_similaire", conn, if_exists="append", index=False)
 
     print("✅ Recommandations similaires et plus saines enregistrées en base")
+    return {"rows_products": int(len(df)), "rows_recommendations": int(len(result_df))}
+
+
+def main():
+    build_similarity_recommendations()
 
 
 if __name__ == "__main__":
