@@ -33,6 +33,58 @@ warnings.filterwarnings(
 )
 
 # ==============================
+# PARAMÈTRES UTILISATEUR
+# ==============================
+
+SIMILARITY_MODE_OPTIONS = {
+    "Ingrédients": "ingredients_jaccard",
+    "Composition avancée (TF-IDF)": "composition_avancee_tfidf",
+    "Même catégorie": "meme_categorie",
+}
+
+HEALTHIER_MODE_OPTIONS = {
+    "Score santé global": "score_global",
+    "Moins de sucre": "moins_sucre",
+    "Moins de sel": "moins_sel",
+    "Moins de graisses saturées": "moins_saturees",
+    "Multi-critères": "multi_criteres",
+}
+
+if "detail_similarity_mode_label" not in st.session_state:
+    st.session_state["detail_similarity_mode_label"] = "Ingrédients"
+
+if "detail_healthier_mode_label" not in st.session_state:
+    st.session_state["detail_healthier_mode_label"] = "Multi-critères"
+
+param_col1, param_col2 = st.columns(2)
+
+with param_col1:
+    selected_similarity_label = st.selectbox(
+        "Mode de similarité",
+        options=list(SIMILARITY_MODE_OPTIONS.keys()),
+        index=list(SIMILARITY_MODE_OPTIONS.keys()).index(
+            st.session_state["detail_similarity_mode_label"]
+        ),
+        help="Choisissez comment les produits similaires sont recherchés."
+    )
+
+with param_col2:
+    selected_healthier_label = st.selectbox(
+        "Critère pour 'plus sain'",
+        options=list(HEALTHIER_MODE_OPTIONS.keys()),
+        index=list(HEALTHIER_MODE_OPTIONS.keys()).index(
+            st.session_state["detail_healthier_mode_label"]
+        ),
+        help="Choisissez selon quel critère les alternatives plus saines sont proposées."
+    )
+
+st.session_state["detail_similarity_mode_label"] = selected_similarity_label
+st.session_state["detail_healthier_mode_label"] = selected_healthier_label
+
+selected_similarity_method = SIMILARITY_MODE_OPTIONS[selected_similarity_label]
+selected_healthier_mode = HEALTHIER_MODE_OPTIONS[selected_healthier_label]
+
+# ==============================
 # RÉCUPÉRATION DU CODE PRODUIT
 # ==============================
 
@@ -139,6 +191,8 @@ SELECT
     ps.score_similarite,
     ps.nb_ingredients_communs,
     ps.ingredients_communs,
+    ps.methode,
+    ps.mode_sante,
     p.nom_produit,
     p.image_url,
     p.image_small_url,
@@ -150,6 +204,8 @@ JOIN produit p
     ON ps.code_produit_cible = p.code_produit
 WHERE ps.code_produit_source = %s
   AND ps.type_recommandation = 'similaire'
+  AND ps.methode = %s
+  AND ps.mode_sante = %s
 ORDER BY ps.score_similarite DESC
 LIMIT 5
 """
@@ -160,6 +216,8 @@ SELECT
     ps.score_similarite,
     ps.nb_ingredients_communs,
     ps.ingredients_communs,
+    ps.methode,
+    ps.mode_sante,
     p.nom_produit,
     p.image_url,
     p.image_small_url,
@@ -171,6 +229,8 @@ JOIN produit p
     ON ps.code_produit_cible = p.code_produit
 WHERE ps.code_produit_source = %s
   AND ps.type_recommandation = 'plus_saine'
+  AND ps.methode = %s
+  AND ps.mode_sante = %s
 ORDER BY ps.score_similarite DESC
 LIMIT 5
 """
@@ -183,8 +243,17 @@ if detail_df.empty:
 
 row = detail_df.iloc[0]
 
-similar_df = pd.read_sql(SIMILAR_PRODUCTS_QUERY, conn, params=(code,))
-healthier_df = pd.read_sql(HEALTHIER_PRODUCTS_QUERY, conn, params=(code,))
+similar_df = pd.read_sql(
+    SIMILAR_PRODUCTS_QUERY,
+    conn,
+    params=(code, selected_similarity_method, selected_healthier_mode)
+)
+
+healthier_df = pd.read_sql(
+    HEALTHIER_PRODUCTS_QUERY,
+    conn,
+    params=(code, selected_similarity_method, selected_healthier_mode)
+)
 
 # ==============================
 # VARIABLES NUTRITIONNELLES
@@ -612,10 +681,17 @@ st.write(row.get("labels", "Non spécifiés"))
 
 st.markdown("---")
 st.markdown("## 🔍 Produits similaires")
-st.caption("Produits proches en composition et en catégorie.")
+st.caption(f"Mode sélectionné : {selected_similarity_label}")
+
+if selected_similarity_label == "Ingrédients":
+    st.caption("Produits proches selon les ingrédients réellement partagés.")
+elif selected_similarity_label == "Composition avancée (TF-IDF)":
+    st.caption("Produits proches selon la composition textuelle globale des ingrédients.")
+elif selected_similarity_label == "Même catégorie":
+    st.caption("Produits proches selon l’appartenance à la même catégorie principale.")
 
 if similar_df.empty:
-    st.info("Aucun produit similaire trouvé.")
+    st.info("Aucun produit similaire trouvé pour ce mode et ce critère santé.")
 else:
     for _, sim in similar_df.iterrows():
         col1, col2 = st.columns([0.25, 0.75])
@@ -636,7 +712,7 @@ else:
 
             if st.button(
                 f"Voir détail similaire {sim['code_produit_cible']}",
-                key=f"sim_{sim['code_produit_cible']}"
+                key=f"sim_{selected_similarity_method}_{selected_healthier_mode}_{sim['code_produit_cible']}"
             ):
                 st.session_state["selected_code"] = sim["code_produit_cible"]
                 try:
@@ -652,10 +728,13 @@ else:
 # ==============================
 
 st.markdown("## 🥗 Alternatives plus saines")
-st.caption("Produits proches en composition, avec une qualité nutritionnelle meilleure ou équivalente.")
+st.caption(
+    f"Alternatives plus saines selon le mode de similarité : {selected_similarity_label} "
+    f"et le critère santé : {selected_healthier_label}"
+)
 
 if healthier_df.empty:
-    st.info("Aucune alternative plus saine trouvée.")
+    st.info("Aucune alternative plus saine trouvée pour ce mode et ce critère.")
 else:
     for _, sim in healthier_df.iterrows():
         col1, col2 = st.columns([0.25, 0.75])
@@ -676,7 +755,7 @@ else:
 
             if st.button(
                 f"Voir détail sain {sim['code_produit_cible']}",
-                key=f"healthy_{sim['code_produit_cible']}"
+                key=f"healthy_{selected_similarity_method}_{selected_healthier_mode}_{sim['code_produit_cible']}"
             ):
                 st.session_state["selected_code"] = sim["code_produit_cible"]
                 try:
