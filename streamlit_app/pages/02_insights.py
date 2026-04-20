@@ -11,8 +11,11 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from db_connection import get_connection
+from top_menu import render_top_menu
 
-st.set_page_config(page_title="Tendances", layout="wide")
+st.set_page_config(page_title="Tendances", layout="wide", initial_sidebar_state="collapsed")
+
+render_top_menu("Tendances")
 
 METRIC_OPTIONS = {
     "Sucre (g/100g)": {
@@ -87,19 +90,6 @@ METRIC_OPTIONS = {
         "caption_suffix": "Pour le NutriScore, une valeur plus faible est meilleure.",
     },
 }
-
-st.markdown(
-    """
-    <style>
-    [data-testid="stSidebarNav"] {display: none;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-if st.button("Retour au Dashboard"):
-    st.switch_page("main.py")
 
 st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
 

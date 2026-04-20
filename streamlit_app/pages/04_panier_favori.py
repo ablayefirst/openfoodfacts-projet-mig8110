@@ -12,27 +12,42 @@ if str(APP_DIR) not in sys.path:
 from db_connection import get_connection
 from health_logic import HealthProfile, compute_personalized_scores
 from image_utils import get_no_image_data_uri
+from top_menu import render_top_menu
 
 
-st.set_page_config(page_title="Mon panier favori", layout="wide")
+st.set_page_config(page_title="Mon panier favori", layout="wide", initial_sidebar_state="collapsed")
 
+render_top_menu("Favoris")
+
+st.title("Mon panier favori")
+
+st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
 st.markdown(
     """
     <style>
-    [data-testid="stSidebarNav"] {display: none;}
+    div[class*="st-key-remove_fav_"] button {
+        min-width: 3rem;
+        padding: 0.35rem 0.8rem;
+        border-radius: 999px;
+        font-size: 1.3rem;
+        line-height: 1;
+        border: 1px solid rgba(225, 29, 72, 0.55);
+        color: #ffffff;
+        background: linear-gradient(135deg, #fb7185, #e11d48);
+        box-shadow: 0 8px 18px rgba(225, 29, 72, 0.2);
+    }
+
+    div[class*="st-key-remove_fav_"] button:hover {
+        border-color: rgba(190, 24, 93, 0.75);
+        box-shadow: 0 10px 20px rgba(225, 29, 72, 0.24);
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-st.title("Mon panier favori")
-
-st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
-
 if "favorites" not in st.session_state or not st.session_state.favorites:
     st.info("Aucun produit dans votre panier favori. Retournez au Dashboard et utilisez le bouton \"Ajouter aux favoris\".")
-    if st.button("Retour au Dashboard"):
-        st.switch_page("main.py")
     st.stop()
 
 codes = [str(c) for c in st.session_state.favorites]
@@ -68,8 +83,6 @@ fav_df = pd.read_sql(QUERY, conn, params=tuple(codes))
 
 if fav_df.empty:
     st.error("Impossible de charger les produits favoris.")
-    if st.button("Retour au Dashboard"):
-        st.switch_page("main.py")
     st.stop()
 
 # Calcul éventuel du score personnalisé
@@ -143,7 +156,12 @@ for index, (_, row) in enumerate(fav_df.iterrows()):
         if pd.notna(row.get("personal_score")):
             st.markdown(f"Score santé personnalisé : {row['personal_score']:.2f}")
 
-        if st.button("Retirer", key=f"remove_fav_{row['code']}"):
+        if st.button(
+            "❤️",
+            key=f"remove_fav_{row['code']}",
+            help="Retirer des favoris",
+            type="primary",
+        ):
             st.session_state.favorites = [c for c in st.session_state.favorites if str(c) != str(row["code"])]
             st.rerun()
 
@@ -174,5 +192,3 @@ elif fav_df["nutriscore_grade"].notna().any():
             f"**{best_row['product_name']}** (code {best_row['code']}) - NutriScore : {best_row['nutriscore_grade']}"
         )
 
-if st.button("Retour au Dashboard"):
-    st.switch_page("main.py")
