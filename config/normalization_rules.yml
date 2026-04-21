@@ -35,6 +35,11 @@ categories:
     - none
     - null
     - n/a
+    - food
+    - aliment
+    - produit
+    - pack
+    - prepared
   blacklist_contains: []
   remove_words: []
   corrections: {}
@@ -58,41 +63,41 @@ category_primary_mapping:
   # Ordered rules: first matching rule is selected.
   rules:
     - name: boisson
-      keywords: [boisson, boissons, beverage, beverages, drink, drinks, juice, jus, soda, sodas, cola, colas, water, waters, eau, tea, the, coffee, cafe, kombucha, mineral water, spring water, carbonated drink, carbonated drinks, unsweetened beverages, sweetened beverages, oat based drinks, almond based drinks, soy based drinks]
+      keywords: [boisson, boissons, beverage, beverages, drink, drinks, juice, jus, soda, sodas, cola, colas, water, waters, eau, tea, the, coffee, cafe, kombucha, smoothie, limonade, biere, mineral water, spring water, carbonated drink, carbonated drinks, unsweetened beverages, sweetened beverages, oat based drinks, almond based drinks, soy based drinks]
     - name: produit_laitier
-      keywords: [lait, laitier, dairy, dairies, milk, milks, yogurt, yogurts, yaourt, cream, creme, fermented milk products, greek style yogurts, dairy desserts]
+      keywords: [lait, laitier, dairy, dairies, milk, milks, yogurt, yogurts, yaourt, cream, creme, beurre, butter, laiterie, fermented milk products, greek style yogurts, dairy desserts]
     - name: fromage
-      keywords: [fromage, fromages, cheese, cheeses, cream cheese, cottage cheese, cheddar, camembert]
+      keywords: [fromage, fromages, cheese, cheeses, cream cheese, cottage cheese, cheddar, camembert, mozzarella, feta]
     - name: fruit
-      keywords: [fruit, fruits, pomme, apple, banana, banane, berry, berries, agrume, citrus]
+      keywords: [fruit, fruits, pomme, apple, banana, banane, berry, berries, baie, mangue, bleuet, agrume, citrus]
     - name: legume
-      keywords: [legume, legumes, vegetable, vegetables, vegetables based foods, tomate, tomato, carotte, carrot, salade, spinach]
+      keywords: [legume, legumes, vegetable, vegetables, vegetables based foods, tomate, tomato, carotte, carrot, salade, spinach, oignon, ail, epinard]
     - name: cereale
-      keywords: [cereal, cereals, cereale, cereales, grain, grains, oat, oats, muesli, mueslis, breakfast cereal, breakfast cereals, flakes, cereal flakes, rolled flakes, rolled oats, extruded cereals, bran]
+      keywords: [cereal, cereals, cereale, cereales, grain, grains, oat, oats, muesli, mueslis, breakfast cereal, breakfast cereals, flakes, cereal flakes, rolled flakes, rolled oats, extruded cereals, bran, granola, avoine, mais]
     - name: pate
-      keywords: [pasta, noodles, nouille, nouilles, macaroni, spaghetti, penne, ravioli, lasagna, lasagne]
+      keywords: [pasta, noodles, nouille, nouilles, macaroni, spaghetti, penne, ravioli, lasagna, lasagne, gnocchi, udon]
     - name: pain
-      keywords: [pain, pains, bread, breads, baguette, toast, sliced breads, white breads, wholemeal breads, rye breads, crispbreads]
+      keywords: [pain, pains, bread, breads, baguette, toast, sliced breads, white breads, wholemeal breads, rye breads, crispbreads, pita, bagel, galette]
     - name: riz
       keywords: [riz, rice, basmati]
     - name: viande
-      keywords: [viande, meat, beef, boeuf, pork, porc, lamb, agneau]
+      keywords: [viande, meat, beef, boeuf, pork, porc, lamb, agneau, jambon, saucisse, salami, charcuterie]
     - name: poulet
-      keywords: [poulet, chicken, turkey, dinde]
+      keywords: [poulet, chicken, turkey, dinde, volaille]
     - name: poisson
-      keywords: [poisson, fish, tuna, thon, salmon, saumon, seafood]
+      keywords: [poisson, fish, tuna, thon, salmon, saumon, seafood, morue, maquereau]
     - name: dessert
-      keywords: [dessert, desserts, sweets, chocolate, chocolates, gateau, gateaux, cake, cakes, biscuit, biscuits, cookies, candy, candies, bonbon, glace, ice cream, sorbet, sorbets, pudding, puddings, compote, compotes, wafers]
+      keywords: [dessert, desserts, sweets, chocolate, chocolates, gateau, gateaux, cake, cakes, biscuit, biscuits, cookies, candy, candies, bonbon, glace, ice cream, sorbet, sorbets, pudding, puddings, compote, compotes, wafers, brownie, muffin, macaron]
     - name: snack
-      keywords: [snack, snacks, salty snacks, appetizer, appetizers, amuse gueules, chips, crisps, chips and fries, popcorn, cracker, crackers, crackers appetizers, craquelin, craquelins, aperitif, pretzel, barres, bars, trail mix]
+      keywords: [snack, snacks, salty snacks, appetizer, appetizers, amuse gueules, chips, crisps, chips and fries, popcorn, cracker, crackers, crackers appetizers, craquelin, craquelins, aperitif, pretzel, barres, bars, trail mix, collation]
     - name: sauce
-      keywords: [sauce, sauces, condiments, ketchup, mustard, mustards, moutarde, mayonnaise, mayonnaises, mayo, pesto, hot sauces, soy sauces, tomato sauces, oyster sauces, hoisin sauces, nuoc mam]
+      keywords: [sauce, sauces, condiments, ketchup, mustard, mustards, moutarde, mayonnaise, mayonnaises, mayo, pesto, hot sauces, soy sauces, tomato sauces, oyster sauces, hoisin sauces, nuoc mam, vinaigrette, chutney]
     - name: huile
       keywords: [huile, oil, olive oil, sunflower oil, canola, colza]
     - name: legumineuse
-      keywords: [legumineuse, legumes and their products, legume sec, lentil, lentille, bean, beans, pois chiche, chickpea, pulses]
+      keywords: [legumineuse, legumes and their products, legume sec, lentil, lentille, bean, beans, pois chiche, chickpea, pulses, haricot, pois, feve, houmous]
     - name: noix
-      keywords: [noix, nuts, nuts and their products, almond, amande, walnut, cashew, pistachio, peanut, peanuts, arachide]
+      keywords: [noix, nuts, nuts and their products, almond, amande, walnut, cashew, pistachio, peanut, peanuts, arachide, noisette, cacahuete]
     - name: soupe
       keywords: [soup, soupe, bouillon]
     - name: vinaigre
@@ -112,6 +117,6 @@ category_primary_mapping:
     - name: complement
       keywords: [supplement, supplements, protein powder, protein powders, protein supplement, protein supplements, bodybuilding supplement, bodybuilding supplements, dietary supplement, dietary supplements, protein bars, energy bars, protein energy bars]
     - name: boulangerie
-      keywords: [boulangerie, bakery, viennoiserie, viennoiseries, brioche, brioches, pastry, pastries, patisserie, patisseries, sweet pastries and pies, croissant, croissants, pain au chocolat, chocolatine, milk bread rolls]
+      keywords: [boulangerie, bakery, viennoiserie, viennoiseries, brioche, brioches, pastry, pastries, patisserie, patisseries, sweet pastries and pies, croissant, croissants, pain au chocolat, chocolatine, milk bread rolls, tarte]
     - name: plat
       keywords: [plat, plats, prepared meal, prepared meals, ready meal, ready meals, meal, meals, repas, frozen meal, frozen meals, microwave meals, pasta dishes, canned meals]

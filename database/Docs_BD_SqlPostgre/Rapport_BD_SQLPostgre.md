@@ -132,7 +132,7 @@ Pour chaque produit (chaque ligne du CSV), le script ouvre une **transaction** (
   - `nutriscore_score` → `nutriscore_score`
   - `nova_group` → `nova_group`
   - `url` → `url`
-  - `image_url`, `image_small_url`, `image_ingredients_url`, `image_ingredients_small_url`, `image_nutrition_url` → colonnes images
+  - `image_url`, `image_small_url`, `image_nutrition_url` → colonnes images
   - `id_marque` récupéré à l’étape précédente.
 - Le helper `format_code()` nettoie la valeur `code` (par exemple `264.0` devient "264") afin qu’elle soit compatible avec la colonne `code_produit` (BIGINT).
 - Le helper `safe()` transforme les valeurs manquantes de pandas (`NaN`) en `NULL` SQL.
@@ -203,6 +203,5 @@ Lors de l’insertion dans ces tables d’association, le script utilise égalem
   ```
 
 - Si, à l’avenir, vous souhaitez que les produits existants soient **mis à jour** (et pas seulement ignorés), il faudra modifier les requêtes SQL dans [database/queries/load_data.py](../queries/load_data.py) pour remplacer `ON CONFLICT DO NOTHING` par `ON CONFLICT (code_produit) DO UPDATE SET ...` avec la liste des colonnes à mettre à jour.
-
 
 
