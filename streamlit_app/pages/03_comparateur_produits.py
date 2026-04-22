@@ -11,18 +11,12 @@ if str(APP_DIR) not in sys.path:
 
 from db_connection import get_connection
 from health_logic import HealthProfile, compute_personalized_scores
+from top_menu import render_top_menu
 
 
-st.set_page_config(page_title="Comparateur de produits", layout="wide")
+st.set_page_config(page_title="Comparateur de produits", layout="wide", initial_sidebar_state="collapsed")
 
-st.markdown(
-    """
-    <style>
-    [data-testid="stSidebarNav"] {display: none;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+render_top_menu("Dashboard")
 
 st.title("Comparateur de produits")
 
@@ -151,5 +145,3 @@ if best_row is not None:
     if reason:
         st.caption(f"Meilleur produit déterminé selon : {reason}.")
 
-if st.button("Retour au Dashboard"):
-    st.switch_page("main.py")
