@@ -1,5 +1,5 @@
 """
-DAG Airflow pour le pipeline Open Food Facts Canada
+DAG Airflow pour le pipeline Open Food Facts United States
 Extraction → Upload MinIO → Transformation → Chargement
 """
 
@@ -38,13 +38,13 @@ default_args = {
 }
 
 with DAG(
-    dag_id="openfood_pipeline_canada",
+    dag_id="openfood_pipeline_united_states",
     default_args=default_args,
-    description="Pipeline ETL Open Food Facts Canada via official full dump and delta exports",
+    description="Pipeline ETL Open Food Facts United States via official full dump and delta exports",
     start_date=datetime(2024, 1, 1),
     schedule=timedelta(days=14),
     catchup=False,
-    tags=["openfood", "canada", "etl"],
+    tags=["openfood", "united_states", "etl"],
 ) as dag:
 
     # Chemin DATA commun (à adapter selon ton docker-compose volume)
@@ -56,7 +56,7 @@ with DAG(
         op_kwargs={
             "mode": os.getenv("OPENFOOD_IMPORT_MODE", "auto"),
             "output_dir": DATA_DIR,
-            "country": os.getenv("OPENFOOD_COUNTRY", "canada"),
+            "country": os.getenv("OPENFOOD_COUNTRY", "united states"),
             "min_core_nutrients": int(os.getenv("OPENFOOD_MIN_CORE_NUTRIENTS", "2")),
             "full_refresh_interval_days": int(os.getenv("OPENFOOD_FULL_REFRESH_INTERVAL_DAYS", "56")),
             "delta_retention_days": int(os.getenv("OPENFOOD_DELTA_RETENTION_DAYS", "14")),

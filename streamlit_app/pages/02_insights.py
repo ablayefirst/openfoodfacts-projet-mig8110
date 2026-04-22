@@ -93,7 +93,7 @@ METRIC_OPTIONS = {
 
 st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
 
-st.title("Tendances des données – OpenFoodFacts Canada")
+st.title("Tendances des données – OpenFoodFacts United States")
 
 st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
 
