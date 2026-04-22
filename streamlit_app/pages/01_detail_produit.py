@@ -10,20 +10,11 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from db_connection import get_connection
+from top_menu import render_top_menu
 
-st.set_page_config(page_title="Détail produit", layout="wide")
+st.set_page_config(page_title="Détail produit", layout="wide", initial_sidebar_state="collapsed")
 
-st.markdown(
-    """
-    <style>
-    [data-testid="stSidebarNav"] {display: none;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-if st.button("Retour au Dashboard"):
-    st.switch_page("main.py")
+render_top_menu("Dashboard")
 
 st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
 
