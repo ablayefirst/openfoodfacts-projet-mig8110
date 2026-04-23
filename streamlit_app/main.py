@@ -1,26 +1,58 @@
+"""Page principale Streamlit : tableau de bord Santé & Nutrition.
+
+Ce module gère :
+- la navigation vers les autres pages (tendances, profil santé, favoris, admin),
+- la barre de recherche et tous les filtres disponibles,
+- la construction de la requête SQL vers PostgreSQL,
+- la préparation des données (nettoyage sucre / sel, NutriScore, etc.),
+- l'application éventuelle du profil santé (tri + filtrage),
+- la pagination des résultats,
+- l'affichage des cartes produits avec actions (détail, comparaison, favoris).
+"""
+
 import os
 import math
 import random
+import sys
 import warnings
+from pathlib import Path
 
 import streamlit as st
 import pandas as pd
 
-from db_connection import get_connection
-from admin import run_admin
+# Ensure local Streamlit modules are importable regardless of launch directory.
+APP_DIR = Path(__file__).resolve().parent
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
 
-from health_profile import (
+from db_connection import get_connection
+from top_menu import render_top_menu
+
+from health_logic import (
     HealthProfile,
     compute_personalized_scores,
-    show_health_profile_page,
 )
+from image_utils import get_no_image_data_uri
 
 
 def clean_nutrient_series(series: pd.Series, max_reasonable: float) -> pd.Series:
+    """Nettoie une série de valeurs nutritionnelles (ex. sucre, sel).
+
+    - `series` contient les valeurs brutes lues depuis la base (peuvent être str, None, etc.).
+    - `max_reasonable` sert à définir une borne haute réaliste (au-delà on considère la donnée invalide).
+    - On applique clean_nutrient_value valeur par valeur et on renvoie une nouvelle série numérique.
+    """
     return series.apply(lambda v: clean_nutrient_value(v, max_reasonable))
 
 
 def clean_nutrient_value(value, max_reasonable: float) -> float:
+    """Convertit une valeur nutritionnelle brute en float nettoyé.
+
+    Étapes :
+    - Tentative de conversion en float ; en cas d'échec → NaN.
+    - Correction de certaines valeurs visiblement en mg (très grandes → division par 100).
+    - Rejet des valeurs négatives ou supérieures à `max_reasonable` → NaN.
+    """
     try:
         numeric = float(value)
     except (TypeError, ValueError):
@@ -29,6 +61,7 @@ def clean_nutrient_value(value, max_reasonable: float) -> float:
     if numeric > (max_reasonable * 10):
         numeric = numeric / 100.0
 
+    # On écarte les valeurs négatives ou beaucoup trop élevées
     if numeric < 0 or numeric > max_reasonable:
         return float("nan")
 
@@ -36,86 +69,78 @@ def clean_nutrient_value(value, max_reasonable: float) -> float:
 
 
 def format_grams(value: float) -> str:
+    """Formate une quantité en grammes pour l'affichage dans les cartes.
+
+    - Si la valeur est NaN → renvoie "Non applicable".
+    - Sinon, affiche avec 2 décimales et l'unité "g".
+    """
     if pd.isna(value):
         return "Non applicable"
     return f"{value:.2f} g"
 
 
 def shorten_text(text: str, max_length: int = 30) -> str:
+    """Raccourcit un texte long pour ne pas casser la mise en page.
+
+    - Si `text` est plus court que `max_length`, on le renvoie tel quel.
+    - Sinon, on tronque et on ajoute un caractère de suspension.
+    """
     if len(text) <= max_length:
         return text
     return text[: max_length - 1] + "…"
 
 
 
-st.set_page_config(page_title="Santé & Nutrition", layout="wide")
+########################################
+# CONFIGURATION GLOBALE DE LA PAGE
+########################################
 
-st.markdown(
-    """
-    <style>
-    [data-testid="stSidebarNav"] {display: none;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# Configuration de base de la page Streamlit (titre de l'onglet, largeur, etc.)
+st.set_page_config(page_title="Santé & Nutrition", layout="wide", initial_sidebar_state="collapsed")
 
-page = st.sidebar.selectbox(
-    "",
-    ["Dashboard", "Tendances", "Mon profil santé", "Admin"],
-    label_visibility="collapsed"
-)
+########################################
+# NAVIGATION PRINCIPALE (MENU HORIZONTAL)
+########################################
 
+render_top_menu("Dashboard")
+
+# Variables de session liées au profil santé :
+# - `health_profile` : profil complet
+# - `use_health_profile` : booléen pour activer/désactiver son utilisation sur le dashboard
 if "health_profile" not in st.session_state:
     st.session_state.health_profile = None
 if "use_health_profile" not in st.session_state:
     st.session_state.use_health_profile = False
 
-# Si admin -> on exécute admin et on stop ici (sinon le dashboard s'affiche aussi)
-if page == "Admin":
-    run_admin()
-    st.stop()
+########################################
+# CONNEXION BD & ÉTAT DE SESSION
+########################################
 
-if page == "Tendances":
-    try:
-        st.switch_page("pages/02_insights.py")
-    except Exception:
-        st.info("Veuillez ouvrir la page 'Tendances' via le menu latéral.")
-    st.stop()
-
-if page == "Mon profil santé":
-    show_health_profile_page()
-    st.stop()
-
-# ==============================
-#  DASHBOARD
-# ==============================
-
-# Titre avec logo sur la même ligne
-title_col1, title_col2 = st.columns([0.15, 0.85])
-with title_col1:
-    # Logo local, chemin basé sur l'emplacement de ce fichier
-    logo_path = os.path.join(os.path.dirname(__file__), "static", "logo", "logo_V2.png")
-    st.image(logo_path, width=100)
-with title_col2:
-    # Utilisation de markdown pour mieux contrôler l'alignement horizontal
-    st.markdown(
-        "<h1 style='margin-top: -10px; margin-bottom: 0;'>Application Santé & Nutrition</h1>",
-        unsafe_allow_html=True,
-    )
-
+# Connexion à la base PostgreSQL (fermée à la fin du script)
 conn = get_connection()
 
 if "selected_code" not in st.session_state:
+    # Code du produit actuellement sélectionné pour la page de détail
     st.session_state.selected_code = None
 
 if "home_selection" not in st.session_state:
+    # Échantillon de produits pour la page d'accueil (cas "is_home")
     st.session_state.home_selection = None
 
 if "page" not in st.session_state:
+    # Index de la page courante de pagination (1-based)
     st.session_state.page = 1
 
 if "compare_selection" not in st.session_state:
+    # Liste des codes produits sélectionnés pour la comparaison (max 3)
     st.session_state.compare_selection = []
+if "favorites" not in st.session_state:
+    # Liste des codes produits marqués comme favoris (panier santé)
+    st.session_state.favorites = []
+
+########################################
+# RÉCUPÉRATION DES CATÉGORIES PRINCIPALES
+########################################
 
 category_options = ["Toutes"]
 try:
@@ -139,18 +164,52 @@ try:
         )
         category_options.extend(values)
 except Exception:
+    # En cas d'erreur sur la requête de catégories, on garde juste "Toutes"
     pass
 
-# ==============================
-#  BARRE DE RECHERCHE
-# ==============================
-
+########################################
+# BARRE DE RECHERCHE & FILTRES PRINCIPAUX
+########################################
+st.markdown("---")
 col1, col2, col3 = st.columns(3)
 
+st.markdown(
+    """
+    <style>
+    div[class*="st-key-fav_"] button {
+        min-width: 3rem;
+        padding: 0.35rem 0.8rem;
+        border-radius: 999px;
+        font-size: 1.3rem;
+        line-height: 1;
+        border: 1px solid rgba(225, 29, 72, 0.22);
+        color: #e11d48;
+        background: rgba(255, 241, 242, 0.96);
+        box-shadow: 0 4px 10px rgba(225, 29, 72, 0.08);
+    }
+
+    div[class*="st-key-fav_"] button[kind="primary"] {
+        border-color: rgba(225, 29, 72, 0.55);
+        color: #ffffff;
+        background: linear-gradient(135deg, #fb7185, #e11d48);
+        box-shadow: 0 8px 18px rgba(225, 29, 72, 0.2);
+    }
+
+    div[class*="st-key-fav_"] button:hover {
+        border-color: rgba(225, 29, 72, 0.5);
+        box-shadow: 0 8px 18px rgba(225, 29, 72, 0.16);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 with col1:
+    # Recherche texte sur le nom du produit
     search_name = st.text_input("Rechercher par nom")
 
 with col2:
+    # Filtre sur la catégorie principale (valeur exacte parmi les catégories connues)
     selected_main_category = st.selectbox(
         "Catégorie principale (exacte)",
         options=category_options,
@@ -158,6 +217,7 @@ with col2:
     )
 
 with col3:
+    # Filtre quantitatif sur le sucre (borne haute en g/100g)
     max_sugar = st.number_input("Sucre max (g/100g)", min_value=0.0, value=50.0)
 
 col4, col5, col6 = st.columns(3)
@@ -165,6 +225,7 @@ col4, col5, col6 = st.columns(3)
 nutriscore_options = ["A", "B", "C", "D", "E"]
 
 with col4:
+    # Filtre multiple sur les grades NutriScore autorisés
     nutriscore_filter = st.multiselect(
         "Filtrer NutriScore",
         options=nutriscore_options,
@@ -172,6 +233,7 @@ with col4:
     )
 
 with col5:
+    # Choix du critère de tri principal (avant le tri personnalisé éventuel)
     sort_option = st.selectbox(
         "Trier par",
         [
@@ -182,16 +244,25 @@ with col5:
     )
 
 with col6:
+    # Ordre de tri (croissant / décroissant)
     sort_order = st.radio(
         "Ordre",
         ("Croissant", "Décroissant"),
         horizontal=True,
     )
 
-category_detail_filter = st.text_input("Recherche libre dans catégories détaillées (optionnel)")
+category_detail_filter = st.text_input(
+    "Recherche libre dans catégories détaillées (optionnel)"
+)
+
+########################################
+# ACTIVATION / DÉSACTIVATION DU PROFIL SANTÉ
+########################################
 
 health_profile = st.session_state.get("health_profile")
 if health_profile is not None:
+    # Si un profil est défini, on propose un bouton pour activer / désactiver
+    # l'utilisation de ce profil dans le tri / filtrage.
     label = (
         "Voir des alternatives plus saines pour moi"
         if not st.session_state.use_health_profile
@@ -202,6 +273,7 @@ if health_profile is not None:
     if st.session_state.use_health_profile:
         st.caption("Tri personnalisé activé en fonction de votre profil santé.")
 else:
+    # Message d'information si aucun profil n'a encore été configuré
     st.caption(
         "Définissez votre profil dans la page 'Mon profil santé' pour obtenir des recommandations personnalisées."
     )
@@ -212,9 +284,11 @@ else:
 profile_signature = None
 hp = st.session_state.get("health_profile")
 if isinstance(hp, HealthProfile):
+    # On résume le profil santé à ce qui impacte le filtrage (ici, les pénalités sucre/sel).
+    # Cela permet de détecter un changement de profil et de remettre la pagination à 1.
     profile_signature = (
-        hp.goal,
-        tuple(sorted(hp.constraints or [])),
+        float(getattr(hp, "sugar_penalty", 0.0)),
+        float(getattr(hp, "salt_penalty", 0.0)),
     )
 
 current_filters_signature = (
@@ -230,17 +304,22 @@ current_filters_signature = (
 )
 
 if "last_filters_signature" not in st.session_state:
+    # Première exécution : on mémorise simplement la signature courante
     st.session_state["last_filters_signature"] = current_filters_signature
 else:
+    # Si un des filtres, du tri ou du profil santé change, on remet la pagination à 1
+    # et on invalide la sélection "home" (pour la recalculer).
     if st.session_state["last_filters_signature"] != current_filters_signature:
         st.session_state.page = 1
         st.session_state.home_selection = None
         st.session_state["last_filters_signature"] = current_filters_signature
 
-# ==============================
-#  REQUÊTE SQL DYNAMIQUE
-# ==============================
+########################################
+# CONSTRUCTION DE LA REQUÊTE SQL DYNAMIQUE
+########################################
 
+# Requête principale : on assemble progressivement les filtres en fonction
+# de ce que l'utilisateur saisit dans l'interface.
 query = """
 SELECT p.code_produit AS code,
        p.nom_produit AS product_name,
@@ -262,6 +341,7 @@ WHERE 1=1
 """
 
 if search_name:
+    # Filtre textuel sur le nom du produit (LIKE insensible à la casse)
     query += " AND LOWER(p.nom_produit) LIKE LOWER(%(search_name)s)"
 
 query_params = {"max_sugar": float(max_sugar)}
@@ -270,12 +350,15 @@ if search_name:
     query_params["search_name"] = f"%{search_name}%"
 
 if selected_main_category != "Toutes":
+    # Filtre exact sur la catégorie principale (avec gestion des valeurs vides → 'autres')
     query += """
     AND LOWER(COALESCE(NULLIF(TRIM(p.categorie_principale), ''), 'autres')) = LOWER(%(category_exact)s)
     """
     query_params["category_exact"] = selected_main_category
 
 if category_detail_filter:
+    # Filtre texte sur les catégories détaillées, en utilisant une sous-requête EXISTS
+    # pour ne garder que les produits ayant au moins une catégorie correspondante.
     query += """
     AND EXISTS (
         SELECT 1
@@ -287,7 +370,9 @@ if category_detail_filter:
     """
     query_params["category_detail_filter"] = f"%{category_detail_filter}%"
 
-# Filtre sucre : compatible avec les produits sans ligne nutritionnelle
+# Filtre sucre côté base :
+# - On accepte les produits sans infos nutritionnelles (v.sugars_100g IS NULL)
+# - Ou ceux dont le sucre est <= max_sugar.
 query += " AND (v.sugars_100g IS NULL OR v.sugars_100g <= %(max_sugar)s)"
 
 query += """
@@ -311,8 +396,10 @@ warnings.filterwarnings(
 )
 
 try:
+    # Lecture du résultat SQL dans un DataFrame pandas
     df = pd.read_sql(query, conn, params=query_params)
 except Exception as e:
+    # En cas d'erreur, on affiche un message et on travaille avec un DF vide mais typé
     st.error(f"Erreur lors du chargement des produits : {e}")
     df = pd.DataFrame(
         columns=[
@@ -331,6 +418,8 @@ except Exception as e:
         ]
     )
 
+# On s'assure que toutes les colonnes attendues existent, même si la requête a renvoyé
+# un sous-ensemble de colonnes.
 if "sugars_100g" not in df.columns:
     df["sugars_100g"] = pd.NA
 if "salt_100g" not in df.columns:
@@ -342,11 +431,14 @@ if "image_url" not in df.columns:
 if "categories" not in df.columns:
     df["categories"] = "Non spécifiée"
 
+# Création de colonnes numériques nettoyées pour le sucre et le sel
 df["sugars_clean"] = clean_nutrient_series(df["sugars_100g"], 50.0)
 df["salt_clean"] = clean_nutrient_series(df["salt_100g"], 25.0)
 
 nutri_series = df["nutriscore_grade"].fillna("").astype(str).str.upper()
 
+# Application du filtre NutriScore : ne garder que les lignes dont le grade
+# est dans la liste sélectionnée. Si aucun grade sélectionné, on vide le DF.
 if nutriscore_filter:
     df = df[nutri_series.isin(nutriscore_filter)]
     nutri_series = nutri_series.loc[df.index]
@@ -354,9 +446,11 @@ else:
     df = df.iloc[0:0]
     nutri_series = nutri_series.iloc[0:0]
 
+# Préparation du sens du tri (croissant / décroissant)
 ascending = sort_order == "Croissant"
 
 if sort_option == "NutriScore (A→E)":
+    # On mappe les lettres A→E sur un rang numérique pour pouvoir trier facilement.
     order_map = {"A": 1, "B": 2, "C": 3, "D": 4, "E": 5}
     nutri_rank = nutri_series.map(order_map).fillna(99)
     df = (
@@ -365,15 +459,23 @@ if sort_option == "NutriScore (A→E)":
         .drop(columns="_nutri_rank")
     )
 elif sort_option == "Sucre (g/100g)":
+    # Tri direct sur la colonne nettoyée du sucre
     df = df.sort_values(by="sugars_clean", ascending=ascending, na_position="last")
 elif sort_option == "Sel (g/100g)":
+    # Tri direct sur la colonne nettoyée du sel
     df = df.sort_values(by="salt_clean", ascending=ascending, na_position="last")
     
+########################################
+# APPLICATION DU PROFIL SANTÉ (TRI + FILTRES SUPPLÉMENTAIRES)
+########################################
+
 health_profile = st.session_state.get("health_profile")
 use_health_profile = st.session_state.get("use_health_profile", False)
 
 if use_health_profile and health_profile is not None and not df.empty:
     try:
+        # 1) Tri personnalisé : on calcule un score pour chaque produit en
+        #    fonction du NutriScore + sucre + sel + préférences utilisateur.
         personalized_scores = compute_personalized_scores(df, health_profile)
         df = (
             df.assign(_personal_score=personalized_scores)
@@ -383,10 +485,34 @@ if use_health_profile and health_profile is not None and not df.empty:
     except Exception as e:
         st.warning(f"Impossible d'appliquer le tri personnalisé : {e}")
 
-# ==============================
-#  PAGINATION
-# ==============================
-# Vue d'accueil par défaut ? (aucune recherche, aucun filtre, sucre par défaut)
+if use_health_profile and health_profile is not None and not df.empty:
+    try:
+        # 2) Filtrage strict : on enlève les produits trop sucrés ou trop salés
+        #    par rapport aux pénalités choisies dans le profil.
+        sugar_penalty = float(getattr(health_profile, "sugar_penalty", 0.0))
+        salt_penalty = float(getattr(health_profile, "salt_penalty", 0.0))
+
+        if sugar_penalty > 0.0:
+            # Seuil dynamique sur le sucre : plus la pénalité est forte,
+            # plus le seuil autorisé est bas.
+            base_sugar = 50.0
+            sugar_limit = base_sugar / (1.0 + sugar_penalty)
+            df = df[(df["sugars_clean"].isna()) | (df["sugars_clean"] <= sugar_limit)]
+
+        if salt_penalty > 0.0:
+            # Seuil dynamique sur le sel : même logique que pour le sucre.
+            base_salt = 25.0
+            salt_limit = base_salt / (1.0 + salt_penalty)
+            df = df[(df["salt_clean"].isna()) | (df["salt_clean"] <= salt_limit)]
+    except Exception as e:
+        st.warning(f"Impossible d'appliquer le filtre du profil santé : {e}")
+
+########################################
+# PAGINATION & VUE D'ACCUEIL
+########################################
+
+# Vue d'accueil par défaut ? (aucune recherche, aucun filtre texte/catégorie,
+# sucre par défaut). Dans ce cas, on affiche un petit échantillon.
 is_home = (
     (not search_name)
     and (selected_main_category == "Toutes")
@@ -429,6 +555,8 @@ if is_home:
 else:
     st.session_state.home_selection = None
 
+    # Cas général : on pagine sur le DataFrame `df` TEL QU'IL EST après
+    # tous les filtres (recherche, catégories, NutriScore, sucre, profil santé, etc.).
     items_per_page = 10
 
     total_pages = max(1, (len(df) + items_per_page - 1) // items_per_page)
@@ -441,10 +569,15 @@ else:
 
     df_page = df.iloc[start:end]
 
-# ==============================
-#  AFFICHAGE EN CARTES
-# ==============================
+########################################
+# AFFICHAGE EN CARTES (LISTE DES PRODUITS)
+########################################
 
+# IMPORTANT : `len(df)` représente ici le nombre de produits RESTANTS après
+# l'ensemble des filtres appliqués :
+# - filtres de la barre de recherche (nom, catégorie, sucre, NutriScore, etc.),
+# - filtre texte sur les catégories détaillées,
+# - filtrage supplémentaire lié au profil santé (seuils sucre / sel).
 st.subheader(f"Résultats ({len(df)} produits trouvés)")
 
 selected_codes = st.session_state.compare_selection
@@ -474,10 +607,15 @@ for index, row in df_page.iterrows():
         else:
             categories_display = ", ".join(cats_list)
 
-    # Image du produit (si disponible)
+    # Image du produit (si disponible), sinon image par défaut
     image_html = ""
-    if pd.notna(row.get("image_url")) and str(row.get("image_url")).strip() != "":
-        image_html = f'<img src="{row["image_url"]}" style="width:100%; height:100%; object-fit:cover; border-radius:8px;" />'
+    image_url = row.get("image_url")
+    if pd.notna(image_url) and str(image_url).strip() != "":
+        image_html = f'<img src="{image_url}" style="width:100%; height:100%; object-fit:cover; border-radius:8px;" />'
+    else:
+        no_image_data = get_no_image_data_uri()
+        if no_image_data:
+            image_html = f'<img src="{no_image_data}" style="width:100%; height:100%; object-fit:cover; border-radius:8px;" />'
 
     grade_upper = (row.get("nutriscore_grade") or "").upper()
     badge_html = ""
@@ -529,38 +667,61 @@ for index, row in df_page.iterrows():
         )
         code_str = str(row["code"])
 
-        # Bouton de détail à l'intérieur de la carte
-        if st.button("Détails", key=f"detail_{code_str}"):
-            st.session_state.selected_code = code_str
-            try:
-                st.query_params["code"] = code_str
-            except AttributeError:
-                st.experimental_set_query_params(code=code_str)
+        action_col1, action_col2, action_col3 = st.columns([1.2, 1.1, 0.7])
 
-            try:
-                st.switch_page("pages/01_detail_produit.py")
-            except Exception:
-                st.info("Veuillez ouvrir la page 'Détail du produit' via le menu latéral.")
+        # Bouton de detail dans la meme ligne d'actions
+        with action_col1:
+            if st.button("Détails", key=f"detail_{code_str}", use_container_width=True):
+                st.session_state.selected_code = code_str
+                try:
+                    st.query_params["code"] = code_str
+                except AttributeError:
+                    st.experimental_set_query_params(code=code_str)
 
-        # Case à cocher pour sélectionner le produit dans le comparateur
+                try:
+                    st.switch_page("pages/01_detail_produit.py")
+                except Exception:
+                    st.info("Veuillez ouvrir la page 'Détail du produit' via le menu latéral.")
+
+        # Case a cocher pour selectionner le produit dans le comparateur, sur la meme ligne
         compare_selected = code_str in st.session_state.compare_selection
-        new_value = st.checkbox(
-            "Comparer",
-            value=compare_selected,
-            key=f"compare_{code_str}",
-        )
+        with action_col2:
+            new_value = st.checkbox(
+                "Comparer",
+                value=compare_selected,
+                key=f"compare_{code_str}",
+            )
 
         if new_value and not compare_selected:
             if len(st.session_state.compare_selection) >= 3:
-                st.warning("Vous ne pouvez comparer que 3 produits à la fois.")
-                # Rétablir l'état de la case à cocher
-                st.session_state[f"compare_{code_str}"] = False
+                # On n'ajoute pas le produit et on affiche seulement un message informatif
+                st.info("Vous ne pouvez comparer que 3 produits à la fois. Décochez un produit avant d'en ajouter un autre.")
             else:
                 st.session_state.compare_selection.append(code_str)
         elif not new_value and compare_selected:
             st.session_state.compare_selection = [
                 c for c in st.session_state.compare_selection if c != code_str
             ]
+
+        # Bouton favori au format coeur, sur la meme ligne d'actions
+        is_favorite = code_str in st.session_state.favorites
+        fav_label = "❤️" if is_favorite else "♡"
+        fav_help = "Retirer des favoris" if is_favorite else "Ajouter aux favoris"
+        with action_col3:
+            if st.button(
+                fav_label,
+                key=f"fav_{code_str}",
+                help=fav_help,
+                type="primary" if is_favorite else "secondary",
+                use_container_width=True,
+            ):
+                if is_favorite:
+                    st.session_state.favorites = [
+                        c for c in st.session_state.favorites if c != code_str
+                    ]
+                else:
+                    st.session_state.favorites.append(code_str)
+        st.markdown("---")
 
 # ==============================
 # ⬅️ ➡️ BOUTONS PAGINATION (sauf accueil aléatoire)

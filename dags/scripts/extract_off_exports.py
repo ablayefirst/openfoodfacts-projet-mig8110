@@ -4,6 +4,7 @@ import gzip
 import io
 import json
 import os
+import random
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -35,6 +36,13 @@ def env_int(name: str, default: int) -> int:
     if raw_value is None or raw_value.strip() == "":
         return default
     return int(raw_value)
+
+
+def env_str(name: str, default: str) -> str:
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value.strip() == "":
+        return default
+    return raw_value.strip()
 
 
 def not_empty(obj: dict[str, Any], key: str) -> bool:
@@ -71,13 +79,13 @@ def nutrient_present(product: dict[str, Any], *keys: str) -> bool:
 
 def count_core_nutrients(product: dict[str, Any]) -> int:
     count = 0
-    if nutrient_present(product, "energy-kcal_100g", "energy_kcal_100g", "energy_100g"):
+    if nutrient_present(product, "energy-kcal_100g", "energy_kcal_100g", "energy-kj_100g", "energy_100g"):
         count += 1
     if nutrient_present(product, "sugars_100g"):
         count += 1
     if nutrient_present(product, "fat_100g"):
         count += 1
-    if nutrient_present(product, "salt_100g"):
+    if nutrient_present(product, "salt_100g", "sodium_100g"):
         count += 1
     return count
 
@@ -89,6 +97,17 @@ def has_category(product: dict[str, Any]) -> bool:
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Extract Open Food Facts official exports (full dump or 14-day deltas)."
+    )
+    parser.add_argument(
+        "--source-mode",
+        choices=["official", "local"],
+        default=env_str("OPENFOOD_SOURCE_MODE", "official"),
+        help="Use official OpenFoodFacts exports or a local JSONL source file.",
+    )
+    parser.add_argument(
+        "--local-file",
+        default=env_str("OPENFOOD_LOCAL_FILE", ""),
+        help="Path to a local JSONL file when --source-mode=local.",
     )
     parser.add_argument("--mode", choices=["auto", "full", "delta"], default="auto")
     parser.add_argument("--output-dir", default="/opt/airflow/data")
@@ -126,6 +145,36 @@ def parse_args():
         type=int,
         default=env_int("OPENFOOD_MAX_ROWS", 500),
         help="Maximum number of filtered rows to keep (0 disables the limit).",
+    )
+    parser.add_argument(
+        "--full-mode",
+        choices=["direct", "sample"],
+        default=env_str("OPENFOOD_FULL_MODE", "direct"),
+        help="For full imports: process the whole dump directly or create a raw sample first.",
+    )
+    parser.add_argument(
+        "--full-sample-size",
+        type=int,
+        default=env_int("OPENFOOD_FULL_SAMPLE_SIZE", 5000),
+        help="Raw sample size used when --full-mode=sample.",
+    )
+    parser.add_argument(
+        "--full-sample-strategy",
+        choices=["first", "random"],
+        default=env_str("OPENFOOD_FULL_SAMPLE_STRATEGY", "first"),
+        help="Sampling strategy used when --full-mode=sample.",
+    )
+    parser.add_argument(
+        "--full-sample-seed",
+        type=int,
+        default=env_int("OPENFOOD_FULL_SAMPLE_SEED", 42),
+        help="Random seed used when --full-sample-strategy=random.",
+    )
+    parser.add_argument(
+        "--delta-max-files",
+        type=int,
+        default=env_int("OPENFOOD_DELTA_MAX_FILES", 0),
+        help="Maximum number of pending delta files to process (0 uses all pending deltas).",
     )
     return parser.parse_args()
 
@@ -324,13 +373,39 @@ def get_remote_content_length(session: requests.Session, source_url: str) -> int
         return None
 
 
+def validate_gzip_file(path: Path) -> tuple[bool, str | None]:
+    try:
+        with path.open("rb") as handle:
+            magic = handle.read(2)
+        if magic != b"\x1f\x8b":
+            return False, f"unexpected gzip header {magic!r}"
+
+        with gzip.open(path, "rb") as handle:
+            handle.read(1)
+        return True, None
+    except OSError as exc:
+        return False, str(exc)
+
+
 def download_source_file(session: requests.Session, source_url: str, download_path: Path) -> Path:
     download_path.parent.mkdir(parents=True, exist_ok=True)
     remote_size = get_remote_content_length(session, source_url)
 
     if download_path.exists() and remote_size is not None and download_path.stat().st_size == remote_size:
-        print(f"Reusing cached download: {download_path.name} ({remote_size} bytes)")
-        return download_path
+        if download_path.suffix == ".gz":
+            is_valid, error = validate_gzip_file(download_path)
+            if not is_valid:
+                print(
+                    f"Cached gzip is invalid for {download_path.name} ({error}); "
+                    "removing it before retrying download."
+                )
+                download_path.unlink(missing_ok=True)
+            else:
+                print(f"Reusing cached download: {download_path.name} ({remote_size} bytes)")
+                return download_path
+        else:
+            print(f"Reusing cached download: {download_path.name} ({remote_size} bytes)")
+            return download_path
 
     for attempt in range(1, DOWNLOAD_MAX_ATTEMPTS + 1):
         existing_size = download_path.stat().st_size if download_path.exists() else 0
@@ -374,6 +449,11 @@ def download_source_file(session: requests.Session, source_url: str, download_pa
                 raise IOError(
                     f"Incomplete download for {source_url}: got {final_size} bytes, expected {remote_size}"
                 )
+            if download_path.suffix == ".gz":
+                is_valid, error = validate_gzip_file(download_path)
+                if not is_valid:
+                    download_path.unlink(missing_ok=True)
+                    raise IOError(f"Downloaded file is not a valid gzip archive: {error}")
 
             print(
                 f"Downloaded source file: {download_path.name} "
@@ -398,6 +478,118 @@ def open_local_text_stream(path: Path):
     if path.suffix == ".gz":
         return gzip.open(path, "rt", encoding="utf-8", errors="replace")
     return path.open("r", encoding="utf-8", errors="replace")
+
+
+def build_full_sample_path(output_path: Path, sample_size: int, sample_strategy: str) -> Path:
+    filename = f"{output_path.stem}_raw_sample_{sample_strategy}_{sample_size}.jsonl"
+    return output_path.parent / "_samples" / filename
+
+
+def create_first_n_sample(
+    source_path: Path,
+    sample_path: Path,
+    sample_size: int,
+) -> dict[str, int]:
+    stats = {"sample_lines_read": 0, "sample_lines_written": 0, "sample_invalid_json_lines": 0}
+    sample_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open_local_text_stream(source_path) as src, sample_path.open("w", encoding="utf-8") as dst:
+        for raw_line in src:
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            stats["sample_lines_read"] += 1
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                stats["sample_invalid_json_lines"] += 1
+                continue
+            if not isinstance(obj, dict):
+                stats["sample_invalid_json_lines"] += 1
+                continue
+
+            dst.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            stats["sample_lines_written"] += 1
+            if stats["sample_lines_written"] >= sample_size:
+                break
+
+    return stats
+
+
+def create_reservoir_sample(
+    source_path: Path,
+    sample_path: Path,
+    sample_size: int,
+    seed: int,
+) -> dict[str, int]:
+    rng = random.Random(seed)
+    reservoir: list[str] = []
+    stats = {"sample_lines_read": 0, "sample_lines_written": 0, "sample_invalid_json_lines": 0}
+
+    with open_local_text_stream(source_path) as src:
+        for raw_line in src:
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                stats["sample_invalid_json_lines"] += 1
+                continue
+            if not isinstance(obj, dict):
+                stats["sample_invalid_json_lines"] += 1
+                continue
+
+            stats["sample_lines_read"] += 1
+            line_json = json.dumps(obj, ensure_ascii=False)
+            if len(reservoir) < sample_size:
+                reservoir.append(line_json)
+            else:
+                idx = rng.randint(0, stats["sample_lines_read"] - 1)
+                if idx < sample_size:
+                    reservoir[idx] = line_json
+
+    sample_path.parent.mkdir(parents=True, exist_ok=True)
+    with sample_path.open("w", encoding="utf-8") as dst:
+        for row in reservoir:
+            dst.write(row + "\n")
+
+    stats["sample_lines_written"] = len(reservoir)
+    return stats
+
+
+def create_local_full_sample(
+    source_path: Path,
+    sample_path: Path,
+    sample_size: int,
+    sample_strategy: str,
+    sample_seed: int,
+) -> dict[str, int]:
+    if sample_size <= 0:
+        raise ValueError("full sample size must be greater than 0")
+
+    if sample_strategy == "first":
+        stats = create_first_n_sample(
+            source_path=source_path,
+            sample_path=sample_path,
+            sample_size=sample_size,
+        )
+    else:
+        stats = create_reservoir_sample(
+            source_path=source_path,
+            sample_path=sample_path,
+            sample_size=sample_size,
+            seed=sample_seed,
+        )
+
+    print(
+        "Created local full sample: "
+        f"path={sample_path}, strategy={sample_strategy}, sample_size={sample_size}, "
+        f"lines_written={stats['sample_lines_written']}, lines_read={stats['sample_lines_read']}"
+    )
+    return stats
 
 def process_local_export_file(
     source_path: Path,
@@ -447,6 +639,69 @@ def process_local_export_file(
     return False
 
 
+def stream_filter_url(
+    session: requests.Session,
+    source_url: str,
+    output_handle,
+    country: str,
+    min_core_nutrients: int,
+    stats: dict[str, int],
+    max_rows: int | None = None,
+) -> bool:
+    """Stream, decompress and filter a remote .jsonl or .jsonl.gz URL without writing it to disk."""
+    is_gzip = source_url.endswith(".gz")
+    for attempt in range(1, DOWNLOAD_MAX_ATTEMPTS + 1):
+        try:
+            with session.get(source_url, stream=True, timeout=(30, 3600)) as response:
+                response.raise_for_status()
+                response.raw.decode_content = False
+                raw_stream = gzip.GzipFile(fileobj=response.raw) if is_gzip else response.raw
+                text_stream = io.TextIOWrapper(raw_stream, encoding="utf-8", errors="replace")
+                for line in text_stream:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    stats["lines_read"] += 1
+                    try:
+                        product = json.loads(line)
+                    except json.JSONDecodeError:
+                        stats["invalid_json_lines"] += 1
+                        continue
+                    if not isinstance(product, dict):
+                        stats["invalid_json_lines"] += 1
+                        continue
+                    if not has_country(product, country):
+                        stats["dropped_country"] += 1
+                        continue
+                    if not not_empty(product, "code"):
+                        stats["dropped_code"] += 1
+                        continue
+                    if not (not_empty(product, "product_name") or not_empty(product, "product_name_fr")):
+                        stats["dropped_name"] += 1
+                        continue
+                    if not has_category(product):
+                        stats["dropped_category"] += 1
+                        continue
+                    if min_core_nutrients > 0 and count_core_nutrients(product) < min_core_nutrients:
+                        stats["dropped_nutrition"] += 1
+                        continue
+                    output_handle.write(json.dumps(product, ensure_ascii=False) + "\n")
+                    stats["rows_kept"] += 1
+                    if max_rows is not None and stats["rows_kept"] >= max_rows:
+                        return True
+            return False
+        except Exception as exc:
+            if attempt >= DOWNLOAD_MAX_ATTEMPTS:
+                raise
+            wait_seconds = min(30, attempt * 5)
+            print(
+                f"Stream attempt {attempt}/{DOWNLOAD_MAX_ATTEMPTS} failed for {source_url}: {exc}. "
+                f"Retrying in {wait_seconds}s..."
+            )
+            time.sleep(wait_seconds)
+    return False
+
+
 def filter_product(product: dict[str, Any], country: str, min_core_nutrients: int) -> str | None:
     if not has_country(product, country):
         return None
@@ -486,11 +741,10 @@ def stream_export_to_jsonl(
     }
 
     with output_path.open("w", encoding="utf-8") as handle:
-        for index, source_url in enumerate(source_urls, start=1):
-            download_path = build_download_cache_path(output_path, source_url, index=index)
-            local_source = download_source_file(session, source_url, download_path)
-            limit_reached = process_local_export_file(
-                source_path=local_source,
+        for source_url in source_urls:
+            limit_reached = stream_filter_url(
+                session=session,
+                source_url=source_url,
                 output_handle=handle,
                 country=country,
                 min_core_nutrients=min_core_nutrients,
@@ -500,6 +754,78 @@ def stream_export_to_jsonl(
             stats["files_downloaded"] += 1
             if limit_reached:
                 break
+
+    return stats
+
+
+def process_full_export(
+    session: requests.Session,
+    source_url: str,
+    output_path: Path,
+    country: str,
+    min_core_nutrients: int,
+    max_rows: int | None,
+    full_mode: str,
+    full_sample_size: int,
+    full_sample_strategy: str,
+    full_sample_seed: int,
+) -> dict[str, int]:
+    stats = {
+        "files_downloaded": 0,
+        "lines_read": 0,
+        "rows_kept": 0,
+        "invalid_json_lines": 0,
+        "dropped_country": 0,
+        "dropped_code": 0,
+        "dropped_name": 0,
+        "dropped_category": 0,
+        "dropped_nutrition": 0,
+        "sample_lines_read": 0,
+        "sample_lines_written": 0,
+        "sample_invalid_json_lines": 0,
+    }
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    stats["files_downloaded"] = 1
+
+    if full_mode == "sample":
+        # Sample mode requires a local copy to do reservoir/first-n sampling
+        download_path = build_download_cache_path(output_path, source_url, index=1)
+        local_source = download_source_file(session, source_url, download_path)
+        sample_path = build_full_sample_path(
+            output_path=output_path,
+            sample_size=full_sample_size,
+            sample_strategy=full_sample_strategy,
+        )
+        sample_stats = create_local_full_sample(
+            source_path=local_source,
+            sample_path=sample_path,
+            sample_size=full_sample_size,
+            sample_strategy=full_sample_strategy,
+            sample_seed=full_sample_seed,
+        )
+        stats.update(sample_stats)
+        with output_path.open("w", encoding="utf-8") as handle:
+            process_local_export_file(
+                source_path=sample_path,
+                output_handle=handle,
+                country=country,
+                min_core_nutrients=min_core_nutrients,
+                stats=stats,
+                max_rows=max_rows,
+            )
+    else:
+        # Direct mode: stream from network, decompress and filter without writing the full dump to disk
+        with output_path.open("w", encoding="utf-8") as handle:
+            stream_filter_url(
+                session=session,
+                source_url=source_url,
+                output_handle=handle,
+                country=country,
+                min_core_nutrients=min_core_nutrients,
+                stats=stats,
+                max_rows=max_rows,
+            )
 
     return stats
 
@@ -533,18 +859,57 @@ def ensure_utc(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
-def build_batch_paths(output_dir: str, import_type: str, suffix: str) -> tuple[Path, str, str]:
+def build_batch_paths(output_dir: str, import_type: str, suffix: str, country: str = "united states") -> tuple[Path, str, str]:
     local_dir = Path(output_dir) / "bronze" / "openfood" / import_type
-    local_filename = f"openfood_canada_{import_type}_{suffix}.jsonl"
+    country_slug = country.lower().replace(" ", "_")
+    local_filename = f"openfood_{country_slug}_{import_type}_{suffix}.jsonl"
     bronze_key = f"openfood/{import_type}/{local_filename}"
     silver_key = bronze_key.replace(".jsonl", ".parquet")
     return local_dir / local_filename, bronze_key, silver_key
 
 
+def resolve_local_source_path(local_file: str, output_dir: str) -> Path:
+    raw_path = Path(local_file)
+    candidates = []
+    if raw_path.is_absolute():
+        candidates.append(raw_path)
+    else:
+        candidates.append(raw_path)
+        if local_file.startswith("data/"):
+            candidates.append(Path(output_dir) / Path(local_file).relative_to("data"))
+        else:
+            candidates.append(Path(output_dir) / raw_path)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[-1]
+
+
+def build_local_source_metadata(local_source: Path, output_dir: str) -> dict[str, Any]:
+    local_filename = sanitize_filename(local_source.name, "openfood_local.jsonl")
+    bronze_key = f"openfood/local/{local_filename}"
+    silver_filename = re.sub(r"\.jsonl(?:\.gz)?$", ".parquet", local_filename)
+    if silver_filename == local_filename:
+        silver_filename = f"{local_source.stem}.parquet"
+    silver_key = f"openfood/local/{silver_filename}"
+    return {
+        "import_type": "local",
+        "local_path": str(local_source),
+        "bronze_key": bronze_key,
+        "silver_key": silver_key,
+        "source_reference": str(local_source),
+        "source_start_ts": None,
+        "source_end_ts": None,
+    }
+
+
 def extract_official_exports(
+    source_mode: str | None = None,
+    local_file: str | None = None,
     mode: str = "auto",
     output_dir: str = "/opt/airflow/data",
-    country: str = "canada",
+    country: str = "united states",
     min_core_nutrients: int | None = None,
     full_refresh_interval_days: int | None = None,
     delta_retention_days: int | None = None,
@@ -552,8 +917,17 @@ def extract_official_exports(
     delta_index_url: str | None = None,
     delta_base_url: str | None = None,
     max_rows: int | None = None,
+    full_mode: str | None = None,
+    full_sample_size: int | None = None,
+    full_sample_strategy: str | None = None,
+    full_sample_seed: int | None = None,
+    delta_max_files: int | None = None,
     **_,
 ) -> dict[str, Any]:
+    if source_mode is None:
+        source_mode = env_str("OPENFOOD_SOURCE_MODE", "official")
+    if local_file is None:
+        local_file = env_str("OPENFOOD_LOCAL_FILE", "")
     if min_core_nutrients is None:
         min_core_nutrients = env_int("OPENFOOD_MIN_CORE_NUTRIENTS", 2)
     if full_refresh_interval_days is None:
@@ -566,10 +940,45 @@ def extract_official_exports(
         delta_index_url = os.getenv("OPENFOOD_DELTA_INDEX_URL", DEFAULT_DELTA_INDEX_URL)
     if delta_base_url is None:
         delta_base_url = os.getenv("OPENFOOD_DELTA_BASE_URL", DEFAULT_DELTA_BASE_URL)
+    if full_mode is None:
+        full_mode = env_str("OPENFOOD_FULL_MODE", "direct")
+    if full_sample_size is None:
+        full_sample_size = env_int("OPENFOOD_FULL_SAMPLE_SIZE", 5000)
+    if full_sample_strategy is None:
+        full_sample_strategy = env_str("OPENFOOD_FULL_SAMPLE_STRATEGY", "first")
+    if full_sample_seed is None:
+        full_sample_seed = env_int("OPENFOOD_FULL_SAMPLE_SEED", 42)
+    if delta_max_files is None:
+        delta_max_files = env_int("OPENFOOD_DELTA_MAX_FILES", 0)
     if max_rows is None:
         max_rows = env_int("OPENFOOD_MAX_ROWS", 500)
     if max_rows <= 0:
         max_rows = None
+    if delta_max_files <= 0:
+        delta_max_files = None
+
+    if source_mode == "local":
+        if not local_file:
+            raise ValueError("OPENFOOD_LOCAL_FILE must be set when OPENFOOD_SOURCE_MODE=local")
+        local_source = resolve_local_source_path(local_file, output_dir)
+        if not local_source.exists():
+            raise FileNotFoundError(f"Local source file not found: {local_source}")
+
+        metadata = build_local_source_metadata(local_source, output_dir)
+        metadata.update(
+            {
+                "files_downloaded": 0,
+                "lines_read": 0,
+                "rows_kept": 0,
+                "invalid_json_lines": 0,
+                "source_mode": "local",
+            }
+        )
+        print(
+            "Local source selected: "
+            f"path={metadata['local_path']}, bronze={metadata['bronze_key']}, silver={metadata['silver_key']}"
+        )
+        return metadata
 
     now_utc = datetime.now(timezone.utc)
     import_state = get_import_state()
@@ -586,14 +995,18 @@ def extract_official_exports(
 
     if run_full:
         suffix = now_utc.strftime("%Y%m%d")
-        output_path, bronze_key, silver_key = build_batch_paths(output_dir, "full", suffix)
-        stats = stream_export_to_jsonl(
+        output_path, bronze_key, silver_key = build_batch_paths(output_dir, "full", suffix, country)
+        stats = process_full_export(
             session=session,
-            source_urls=[full_jsonl_url],
+            source_url=full_jsonl_url,
             output_path=output_path,
             country=country,
             min_core_nutrients=min_core_nutrients,
             max_rows=max_rows,
+            full_mode=full_mode,
+            full_sample_size=full_sample_size,
+            full_sample_strategy=full_sample_strategy,
+            full_sample_seed=full_sample_seed,
         )
         metadata = {
             "import_type": "full",
@@ -603,12 +1016,17 @@ def extract_official_exports(
             "source_reference": full_jsonl_url,
             "source_start_ts": None,
             "source_end_ts": None,
+            "full_mode": full_mode,
+            "full_sample_size": full_sample_size if full_mode == "sample" else None,
+            "full_sample_strategy": full_sample_strategy if full_mode == "sample" else None,
             **stats,
         }
     else:
         delta_entries = list_delta_files(session=session, index_url=delta_index_url, base_url=delta_base_url)
         last_delta_end_ts = import_state["last_delta_end_ts"] or 0
         pending_entries = [entry for entry in delta_entries if entry["end_ts"] > last_delta_end_ts]
+        if delta_max_files is not None:
+            pending_entries = pending_entries[:delta_max_files]
 
         if not pending_entries:
             raise AirflowSkipException("No new delta export to ingest.")
@@ -616,7 +1034,7 @@ def extract_official_exports(
         start_ts = pending_entries[0]["start_ts"]
         end_ts = pending_entries[-1]["end_ts"]
         suffix = f"{start_ts}_{end_ts}"
-        output_path, bronze_key, silver_key = build_batch_paths(output_dir, "delta", suffix)
+        output_path, bronze_key, silver_key = build_batch_paths(output_dir, "delta", suffix, country)
         stats = stream_export_to_jsonl(
             session=session,
             source_urls=[entry["url"] for entry in pending_entries],
@@ -633,6 +1051,7 @@ def extract_official_exports(
             "source_reference": ",".join(entry["filename"] for entry in pending_entries),
             "source_start_ts": start_ts,
             "source_end_ts": end_ts,
+            "delta_files_selected": len(pending_entries),
             **stats,
         }
 
@@ -644,6 +1063,14 @@ def extract_official_exports(
         f"rows_kept={metadata['rows_kept']}, "
         f"invalid_json_lines={metadata['invalid_json_lines']}"
     )
+    if metadata["import_type"] == "full" and metadata.get("full_mode") == "sample":
+        print(
+            "Full sample summary: "
+            f"sample_size={metadata.get('full_sample_size')}, "
+            f"sample_strategy={metadata.get('full_sample_strategy')}, "
+            f"sample_lines_written={metadata.get('sample_lines_written', 0)}, "
+            f"sample_lines_read={metadata.get('sample_lines_read', 0)}"
+        )
     print(f"Prepared local Bronze file: {metadata['local_path']}")
     print(f"Planned MinIO keys: bronze={metadata['bronze_key']}, silver={metadata['silver_key']}")
     return metadata
@@ -652,6 +1079,8 @@ def extract_official_exports(
 def main():
     args = parse_args()
     extract_official_exports(
+        source_mode=args.source_mode,
+        local_file=args.local_file,
         mode=args.mode,
         output_dir=args.output_dir,
         country=args.country,
@@ -662,6 +1091,11 @@ def main():
         delta_index_url=args.delta_index_url,
         delta_base_url=args.delta_base_url,
         max_rows=args.max_rows,
+        full_mode=args.full_mode,
+        full_sample_size=args.full_sample_size,
+        full_sample_strategy=args.full_sample_strategy,
+        full_sample_seed=args.full_sample_seed,
+        delta_max_files=args.delta_max_files,
     )
 
 

@@ -8,3 +8,4 @@ pyarrow==14.0.1
 fastparquet==2023.10.1
 psycopg2-binary==2.9.9
 PyYAML==6.0.2
+scikit-learn==1.4.2

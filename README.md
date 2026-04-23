@@ -5,8 +5,9 @@
 Ce projet met en place une chaîne de traitement de données autour des exports OpenFoodFacts Canada:
 
 - extraction des exports officiels OpenFoodFacts
+- prise en charge optionnelle d'une source locale JSONL pour le bootstrap
 - dépôt des données brutes dans MinIO
-- transformation et normalisation en couche Silver
+- nettoyage en deux étapes et normalisation en couche Silver
 - chargement dans PostgreSQL
 - exploration et administration via une application Streamlit
 
@@ -14,9 +15,9 @@ L'architecture est orchestrée avec Docker Compose et Airflow. La couche Silver 
 
 ## 1. Objectifs
 
-- Extraire les produits OpenFoodFacts Canada depuis les exports officiels
+- Extraire les produits OpenFoodFacts Canada depuis les exports officiels ou une source locale
 - Contrôler la qualité minimale des données avant ingestion
-- Normaliser certains champs métier, notamment les catégories
+- Normaliser certains champs métier, notamment les catégories, le NutriScore et les quantités
 - Charger un schéma PostgreSQL normalisé
 - Améliorer les performances de consultation avec des index SQL
 - Offrir une interface Streamlit pour la recherche, l'analyse et la comparaison de produits
@@ -38,30 +39,40 @@ Services principaux:
 Vue simplifiée:
 
 ```text
-OpenFoodFacts Official Exports
+Source de données
       |
-      +--> Full dump (full)
+      +--> Exports officiels OpenFoodFacts
       |
-      +--> Delta exports (delta)
+      |     +--> Full dump (full)
+      |     +--> Delta exports (delta)
+      |
+      +--> Fichier local JSONL (mode local)
       |
       v
-Airflow DAG (extract -> upload -> transform -> load)
-      |                         |
-      |                         +--> MinIO silver (Parquet)
-      +--> MinIO bronze (JSONL)
-                                |
-                                v
-                          PostgreSQL (schéma normalisé + index)
-                                |
-                                v
-                      Streamlit (dashboard, insights, admin)
+Airflow DAG
+extract -> upload -> first_clean -> second_clean -> merge -> load
+      |
+      +--> MinIO bronze (JSONL brut)
+      |
+      +--> MinIO silver
+            +--> first/..._file1_good.parquet
+            +--> first/..._file2_bad.jsonl
+            +--> second/..._recovered.parquet
+            +--> second/..._reject.jsonl
+            +--> final parquet fusionné
+      |
+      v
+PostgreSQL (schéma normalisé + index)
+      |
+      v
+Streamlit (dashboard, insights, admin)
 ```
 
 ## 3. Architecture Data
 
 ### Bronze
 
-- Données brutes issues du dump complet ou des delta exports
+- Données brutes issues d'un full, d'un delta ou d'un fichier local
 - Format: `JSONL`
 - Bucket MinIO: `bronze`
 - Scripts principaux:
@@ -70,12 +81,27 @@ Airflow DAG (extract -> upload -> transform -> load)
 
 ### Silver
 
-- Nettoyage, harmonisation et enrichissement des champs
+- Nettoyage, récupération, harmonisation et enrichissement des champs
 - Normalisation pilotée par `config/normalization_rules.yml`
 - Format conservé: `Parquet`
 - Bucket MinIO: `silver`
-- Script principal:
+- Scripts principaux:
   - `dags/scripts/transform_to_silver.py`
+  - `dags/scripts/first_clean_from_bronze.py`
+  - `dags/scripts/second_clean_from_bad.py`
+  - `dags/scripts/merge_final_clean.py`
+
+Le pipeline Silver produit maintenant quatre sorties intermédiaires:
+
+- `file1_good.parquet`: lignes conformes dès le premier nettoyage
+- `file2_bad.jsonl`: lignes échouant au premier contrat qualité mais encore récupérables
+- `recovered.parquet`: lignes sauvées au second nettoyage
+- `reject.jsonl`: lignes toujours invalides après la seconde tentative
+
+Le fichier Silver final chargé dans PostgreSQL est la fusion dédupliquée de:
+
+- `file1_good`
+- `recovered`
 
 ### Chargement PostgreSQL
 
@@ -96,8 +122,10 @@ Ordre des tâches:
 
 1. `extract_products`
 2. `upload_to_minio`
-3. `transform_to_silver`
-4. `load_to_postgres`
+3. `first_clean_from_bronze`
+4. `second_clean_from_bad`
+5. `merge_final_clean`
+6. `load_to_postgres`
 
 Planification actuelle:
 
@@ -106,9 +134,88 @@ Planification actuelle:
 
 Stratégie d'ingestion:
 
-- premier chargement: dump complet OpenFoodFacts
-- chargements suivants: delta exports non encore importés
+- premier chargement possible: dump complet OpenFoodFacts ou fichier local JSONL
+- chargements incrémentaux: delta exports non encore importés
 - rafraîchissement complet périodique pour couvrir les suppressions côté source
+
+Modes de source pris en charge:
+
+- `OPENFOOD_SOURCE_MODE=official`
+  - utilise les exports OpenFoodFacts
+  - avec `OPENFOOD_IMPORT_MODE=full`, `delta` ou `auto`
+- `OPENFOOD_SOURCE_MODE=local`
+  - utilise un fichier JSONL local défini par `OPENFOOD_LOCAL_FILE`
+  - utile pour bootstrapper le projet à partir d'un export déjà disponible
+
+Options utiles d'extraction:
+
+- `OPENFOOD_FULL_MODE=direct|sample`
+- `OPENFOOD_FULL_SAMPLE_SIZE`
+- `OPENFOOD_FULL_SAMPLE_STRATEGY=first|random`
+- `OPENFOOD_DELTA_MAX_FILES`
+
+### Rôle détaillé des deux nettoyages
+
+#### Premier nettoyage: `first_clean_from_bronze`
+
+Cette étape lit le JSONL Bronze depuis MinIO et transforme chaque produit vers le schéma Silver cible.
+
+Elle utilise:
+
+- `build_row(..., recovery_mode=False)`
+- `evaluate_final_contract(...)`
+
+Son objectif est de faire un premier tri qualité:
+
+- normaliser les champs principaux
+- vérifier la présence et la cohérence des données importantes
+- séparer les lignes directement exploitables des lignes encore douteuses
+
+Résultats:
+
+- `file1_good.parquet`
+  - contient les lignes qui passent déjà le contrat qualité final
+- `file2_bad.jsonl`
+  - contient les lignes qui ont encore des problèmes mais qui méritent une seconde tentative
+
+Exemples de contrôles appliqués à ce stade:
+
+- qualité du nom produit
+- présence et normalisation des catégories
+- cohérence du NutriScore
+- format de quantité
+- cohérence énergétique ou sel/sodium selon les champs disponibles
+
+#### Second nettoyage: `second_clean_from_bad`
+
+Cette étape relit uniquement `file2_bad.jsonl`.
+
+Elle applique la même logique métier générale, mais dans un mode plus tolérant:
+
+- `build_row(..., recovery_mode=True)`
+- `evaluate_final_contract(...)`
+
+Le second nettoyage sert à récupérer les cas limites qui n'ont pas passé le premier filtre, par exemple:
+
+- recherche du nom dans des champs alternatifs
+- récupération plus large des catégories
+- récupération de marques via variantes linguistiques
+- réconciliation plus souple entre `nutriscore_grade` et `nutriscore_score`
+- meilleure normalisation des quantités atypiques
+
+Résultats:
+
+- `recovered.parquet`
+  - lignes sauvées au second passage
+- `reject.jsonl`
+  - lignes définitivement rejetées après la seconde tentative
+
+Cette séparation permet de mieux contrôler la qualité des données:
+
+- `good` = propre dès le départ
+- `bad` = encore récupérable
+- `recovered` = corrigé avec succès
+- `reject` = non exploitable en l'état
 
 Fichier DAG:
 
@@ -181,8 +288,23 @@ Une fois la stack démarrée:
 
 1. Ouvrir Airflow
 2. Vérifier que le DAG `openfood_pipeline_canada` est visible
-3. Lancer un run manuel si nécessaire
-4. Ouvrir Streamlit pour consulter les données chargées
+3. Configurer si nécessaire le mode de source dans `.env`
+4. Lancer un run manuel si nécessaire
+5. Ouvrir Streamlit pour consulter les données chargées
+
+Exemple pour utiliser un fichier local:
+
+```env
+OPENFOOD_SOURCE_MODE=local
+OPENFOOD_LOCAL_FILE=data/bronze/openfood/local/openfood_canada_local.jsonl
+```
+
+Exemple pour utiliser la source officielle:
+
+```env
+OPENFOOD_SOURCE_MODE=official
+OPENFOOD_IMPORT_MODE=auto
+```
 
 ## 9. Accès aux Services
 
@@ -203,7 +325,7 @@ Identifiants par défaut utiles:
 
 - Airflow démarre et expose le DAG `openfood_pipeline_canada`
 - MinIO contient les buckets `bronze`, `silver` et `gold` initialisés
-- la couche `silver` est stockée en `Parquet`
+- la couche `silver` contient les sorties intermédiaires de nettoyage et le fichier final en `Parquet`
 - PostgreSQL contient les tables normalisées et `etl_import_history`
 - les index SQL sont créés
 - Streamlit permet la navigation entre dashboard, tendances, comparaison, profil santé et administration

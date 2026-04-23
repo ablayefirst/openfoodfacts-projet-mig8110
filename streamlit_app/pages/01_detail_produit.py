@@ -1,22 +1,20 @@
+import sys
+from pathlib import Path
+
 import streamlit as st
 import pandas as pd
 import warnings
 
+APP_DIR = Path(__file__).resolve().parents[1]
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
+
 from db_connection import get_connection
+from top_menu import render_top_menu
 
-st.set_page_config(page_title="Détail produit", layout="wide")
+st.set_page_config(page_title="Détail produit", layout="wide", initial_sidebar_state="collapsed")
 
-st.markdown(
-    """
-    <style>
-    [data-testid="stSidebarNav"] {display: none;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-if st.button("Retour au Dashboard"):
-    st.switch_page("main.py")
+render_top_menu("Dashboard")
 
 st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
 
@@ -131,6 +129,8 @@ if code is None:
     st.warning("Aucun code produit trouvé dans la session ou dans l’URL.")
     st.info("Retournez au dashboard et cliquez sur le bouton 'Détails' d'un produit.")
     st.stop()
+
+st.session_state.pop("detail_reco_error", None)
 
 # synchronisation de l'URL
 try:
@@ -256,6 +256,34 @@ ORDER BY ps.score_similarite DESC
 LIMIT 5
 """
 
+RECOMMENDATION_COLUMNS = [
+    "code_produit_cible",
+    "score_similarite",
+    "nb_ingredients_communs",
+    "ingredients_communs",
+    "nom_produit",
+    "image_url",
+    "image_small_url",
+    "nutrition_grade",
+    "nova_group",
+    "categorie_principale",
+]
+
+
+def read_optional_recommendations(query: str, product_code: str) -> pd.DataFrame:
+    """Load optional recommendation data without breaking the detail page.
+
+    The recommendations table is populated by a separate process and may not
+    exist yet in some environments. In that case we keep the page usable and
+    simply return an empty result.
+    """
+
+    try:
+        return pd.read_sql(query, conn, params=(product_code,))
+    except Exception as exc:
+        st.session_state["detail_reco_error"] = str(exc)
+        return pd.DataFrame(columns=RECOMMENDATION_COLUMNS)
+
 detail_df = pd.read_sql(DETAIL_QUERY, conn, params=(code,))
 
 if detail_df.empty:
@@ -275,6 +303,8 @@ healthier_df = pd.read_sql(
     conn,
     params=(code, selected_healthier_method)
 )
+similar_df = read_optional_recommendations(SIMILAR_PRODUCTS_QUERY, code)
+healthier_df = read_optional_recommendations(HEALTHIER_PRODUCTS_QUERY, code)
 
 # ==============================
 # VARIABLES NUTRITIONNELLES
@@ -758,6 +788,32 @@ st.write(row.get("labels", "Non spécifiés"))
 
 if show_recommendations_warning:
     st.warning("Veuillez sélectionner au moins un type de recommandation pour afficher les suggestions.")
+st.markdown("---")
+st.markdown("## 🔍 Produits similaires")
+st.caption("Produits proches en composition et en catégorie.")
+
+if st.session_state.get("detail_reco_error"):
+    st.info("Les recommandations similaires ne sont pas encore disponibles dans cette base de données.")
+
+if similar_df.empty:
+    st.info("Aucun produit similaire trouvé.")
+else:
+    for _, sim in similar_df.iterrows():
+        col1, col2 = st.columns([0.25, 0.75])
+
+        with col1:
+            sim_img = sim.get("image_url") or sim.get("image_small_url")
+            if pd.notna(sim_img) and str(sim_img).strip() != "":
+                st.image(str(sim_img), width=120)
+
+        with col2:
+            st.markdown(f"### {sim.get('nom_produit', 'Produit sans nom')}")
+            st.markdown(f"**Score de similarité :** {sim.get('score_similarite', 0)}")
+            st.markdown(f"**Catégorie :** {sim.get('categorie_principale', 'Non spécifiée')}")
+            st.markdown(f"**NutriScore :** {sim.get('nutrition_grade', 'N/A')}")
+            st.markdown(f"**Groupe NOVA :** {sim.get('nova_group', 'N/A')}")
+            st.markdown(f"**Ingrédients communs :** {sim.get('ingredients_communs', 'Aucun')}")
+            st.markdown(f"**Nombre d’ingrédients communs :** {sim.get('nb_ingredients_communs', 0)}")
 
 # ==============================
 # PRODUITS SIMILAIRES

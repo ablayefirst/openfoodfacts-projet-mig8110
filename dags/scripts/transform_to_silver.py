@@ -23,6 +23,13 @@ except ImportError:
 
 
 GRADE_TO_SCORE = {"a": -1, "b": 1, "c": 7, "d": 15, "e": 19}
+GRADE_SCORE_RANGES = {
+    "a": (None, -1),
+    "b": (0, 2),
+    "c": (3, 10),
+    "d": (11, 18),
+    "e": (19, None),
+}
 OFF_PRODUCT_BASE_URL = "https://world.openfoodfacts.org/product"
 OFF_IMAGE_BASE_URL = "https://images.openfoodfacts.org/images/products"
 
@@ -429,6 +436,7 @@ def normalize_categories_fields(
     product: dict[str, Any],
     rules: dict[str, Any],
     stats: dict[str, int],
+    recovery_mode: bool = False,
 ) -> tuple[str | None, list[str]]:
     tag_values = normalize_tag_list(product.get("categories_tags"))
     normalized_tags = apply_rules_to_values(tag_values, rules["categories"], stats)
@@ -440,14 +448,26 @@ def normalize_categories_fields(
             stats["categories_normalized"] += 1
         return categories_text, normalized_tags
 
-    fallback_values = split_text_values(product.get("categories"), separators=r"[,;•]")
-    normalized_fallback = apply_rules_to_values(fallback_values, rules["categories"], stats)
-    if normalized_fallback:
-        categories_text = ", ".join(normalized_fallback)
-        raw_categories = clean_text(product.get("categories"))
-        if categories_text != raw_categories:
-            stats["categories_normalized"] += 1
-        return categories_text, normalized_fallback
+    fallback_sources = [product.get("categories")]
+    if recovery_mode:
+        fallback_sources.extend(
+            [
+                product.get("categories_en"),
+                product.get("categories_fr"),
+                product.get("pnns_groups_1"),
+                product.get("pnns_groups_2"),
+            ]
+        )
+
+    for source in fallback_sources:
+        fallback_values = split_text_values(source, separators=r"[,;•]")
+        normalized_fallback = apply_rules_to_values(fallback_values, rules["categories"], stats)
+        if normalized_fallback:
+            categories_text = ", ".join(normalized_fallback)
+            raw_categories = clean_text(source)
+            if categories_text != raw_categories:
+                stats["categories_normalized"] += 1
+            return categories_text, normalized_fallback
 
     return clean_text(product.get("categories")), []
 
@@ -539,6 +559,7 @@ def normalize_ingredients_text(
     product: dict[str, Any],
     rules: dict[str, Any],
     stats: dict[str, int],
+    recovery_mode: bool = False,
 ) -> str | None:
     ingredient_keys = [
         "ingredients_text",
@@ -554,6 +575,11 @@ def normalize_ingredients_text(
         if key.endswith("_debug") or key in ingredient_keys:
             continue
         ingredient_keys.append(key)
+
+    if recovery_mode:
+        for key in ("ingredients_debug", "ingredients_original_tags"):
+            if key in product and key not in ingredient_keys:
+                ingredient_keys.append(key)
 
     raw_ingredients = first_clean_text(*(product.get(key) for key in ingredient_keys))
     if raw_ingredients is None:
@@ -618,12 +644,17 @@ def build_product_url(code: str | None, raw_url: Any = None) -> str | None:
     return f"{OFF_PRODUCT_BASE_URL}/{code}"
 
 
-def normalize_brands(product: dict[str, Any]) -> str | None:
+def normalize_brands(product: dict[str, Any], recovery_mode: bool = False) -> str | None:
     direct_brand = first_clean_text(
         product.get("brands"),
         product.get("brand_owner"),
         product.get("brand_owner_imported"),
     )
+    if recovery_mode and direct_brand is None:
+        direct_brand = first_clean_text(
+            product.get("brands_en"),
+            product.get("brands_fr"),
+        )
     if direct_brand is not None:
         return direct_brand
 
@@ -763,6 +794,36 @@ def score_to_grade(score: int | None) -> str | None:
     return "e"
 
 
+def score_matches_grade(grade: str | None, score: int | None) -> bool:
+    if grade is None or score is None:
+        return False
+
+    lower, upper = GRADE_SCORE_RANGES.get(grade, (None, None))
+    if lower is not None and score < lower:
+        return False
+    if upper is not None and score > upper:
+        return False
+    return True
+
+
+def pick_product_name(product: dict[str, Any], recovery_mode: bool = False) -> str | None:
+    candidates = [
+        product.get("product_name"),
+        product.get("product_name_fr"),
+    ]
+    if recovery_mode:
+        candidates.extend(
+            [
+                product.get("product_name_en"),
+                product.get("generic_name"),
+                product.get("generic_name_fr"),
+                product.get("generic_name_en"),
+                product.get("abbreviated_product_name"),
+            ]
+        )
+    return first_clean_text(*candidates)
+
+
 def normalize_tag(value: Any) -> str | None:
     txt = clean_text(value)
     if txt is None:
@@ -860,12 +921,24 @@ def normalize_quantity_text(txt: str) -> str:
     txt = re.sub(r"\bliters?\b", " l ", txt)
     txt = re.sub(r"\blitre\b", " l ", txt)
     txt = re.sub(r"\bliter\b", " l ", txt)
+    txt = re.sub(r"(\d)\s*gm\b", r"\1 g", txt)
     txt = re.sub(r"(\d)\s*gr\b", r"\1 g", txt)
     txt = re.sub(r"\bgrams?\b", " g ", txt)
+    txt = re.sub(r"\bgms\b", " g ", txt)
+    txt = re.sub(r"\bgm\b", " g ", txt)
     txt = re.sub(r"\bgr\b", " g ", txt)
+    txt = re.sub(r"\bpieces?\b", " unit ", txt)
+    txt = re.sub(r"\bpcs\b", " unit ", txt)
+    txt = re.sub(r"\bpc\b", " unit ", txt)
+    txt = re.sub(r"\btablets?\b", " unit ", txt)
+    txt = re.sub(r"\btablillas?\b", " unit ", txt)
+    txt = re.sub(r"\bcapsules?\b", " unit ", txt)
+    txt = re.sub(r"\bcaplets?\b", " unit ", txt)
     txt = re.sub(r"\blbs\b", " lb ", txt)
     txt = re.sub(r"\bfl\.?\s*oz\b", " floz ", txt)
     txt = re.sub(r"\bozs\b", " oz ", txt)
+    txt = re.sub(r"/\s*(bottle|pack|box|bag|jar|tray|can|carton|wrapper|sachet)\b", "", txt)
+    txt = re.sub(r"\bper\s+(bottle|pack|box|bag|jar|tray|can|carton|wrapper|sachet)\b", "", txt)
     txt = re.sub(r"\s+", " ", txt).strip()
     return txt
 
@@ -878,6 +951,7 @@ def normalize_quantity(value: Any) -> tuple[str | None, float | None, str | None
     normalized = normalize_quantity_text(txt)
     chunks = re.split(r"[;,]", normalized)
     metric_units = {"kg", "g", "mg", "ml", "cl", "dl", "l"}
+    count_units = {"unit"}
     candidates: list[tuple[int, float, str]] = []
 
     for raw in chunks:
@@ -885,30 +959,45 @@ def normalize_quantity(value: Any) -> tuple[str | None, float | None, str | None
             continue
 
         multiplier_matches = re.finditer(
-            r"(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)\s*(kg|g|mg|oz|lb|ml|cl|dl|l|floz)\b",
+            r"(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)\s*(kg|g|mg|oz|lb|ml|cl|dl|l|floz|unit)\b",
             raw,
         )
         for match in multiplier_matches:
             a, b, unit = match.groups()
-            converted = convert_measurement(float(a) * float(b), unit)
-            if converted is None:
-                continue
-            quantity, canonical_unit = converted
-            priority = 0 if unit in metric_units else 1
+            if unit in count_units:
+                quantity = float(a) * float(b)
+                canonical_unit = unit
+                priority = 2
+            else:
+                converted = convert_measurement(float(a) * float(b), unit)
+                if converted is None:
+                    continue
+                quantity, canonical_unit = converted
+                priority = 0 if unit in metric_units else 1
             candidates.append((priority, quantity, canonical_unit))
 
         single_matches = re.finditer(
-            r"(\d+(?:\.\d+)?)\s*(kg|g|mg|oz|lb|ml|cl|dl|l|floz)\b",
+            r"(\d+(?:\.\d+)?)\s*(kg|g|mg|oz|lb|ml|cl|dl|l|floz|unit)\b",
             raw,
         )
         for match in single_matches:
             quantity_raw, unit = match.groups()
-            converted = convert_measurement(float(quantity_raw), unit)
-            if converted is None:
-                continue
-            quantity, canonical_unit = converted
-            priority = 0 if unit in metric_units else 1
+            if unit in count_units:
+                quantity = float(quantity_raw)
+                canonical_unit = unit
+                priority = 2
+            else:
+                converted = convert_measurement(float(quantity_raw), unit)
+                if converted is None:
+                    continue
+                quantity, canonical_unit = converted
+                priority = 0 if unit in metric_units else 1
             candidates.append((priority, quantity, canonical_unit))
+
+        bare_number_match = re.fullmatch(r"(\d+(?:\.\d+)?)", raw.strip())
+        if bare_number_match:
+            quantity = float(bare_number_match.group(1))
+            candidates.append((2, quantity, "unit"))
 
     if candidates:
         priority, quantity, canonical_unit = min(candidates, key=lambda item: (item[0], item[1] <= 0, item[1]))
@@ -996,7 +1085,12 @@ def should_replace_duplicate(existing: dict[str, Any], candidate: dict[str, Any]
     return completeness_score(candidate) >= completeness_score(existing)
 
 
-def build_row(product: dict[str, Any], stats: dict[str, int], rules: dict[str, Any]) -> dict[str, Any]:
+def build_row(
+    product: dict[str, Any],
+    stats: dict[str, int],
+    rules: dict[str, Any],
+    recovery_mode: bool = False,
+) -> dict[str, Any]:
     nutriments = product.get("nutriments") or {}
     if not isinstance(nutriments, dict):
         nutriments = {}
@@ -1019,6 +1113,11 @@ def build_row(product: dict[str, Any], stats: dict[str, int], rules: dict[str, A
         nutriscore_score = GRADE_TO_SCORE.get(nutriscore_grade)
         if nutriscore_score is not None:
             stats["nutri_score_imputed"] += 1
+    elif recovery_mode and not score_matches_grade(nutriscore_grade, nutriscore_score):
+        recovered_grade = score_to_grade(nutriscore_score)
+        if recovered_grade is not None and recovered_grade != nutriscore_grade:
+            nutriscore_grade = recovered_grade
+            stats["nutri_grade_imputed"] += 1
 
     energy_100g = clean_float(nutriments.get("energy_100g"))
     energy_kj_100g = clean_float(nutriments.get("energy-kj_100g"))
@@ -1039,9 +1138,19 @@ def build_row(product: dict[str, Any], stats: dict[str, int], rules: dict[str, A
         stats=stats,
     )
 
-    categories_text, categories_tags = normalize_categories_fields(product, rules, stats)
+    categories_text, categories_tags = normalize_categories_fields(
+        product,
+        rules,
+        stats,
+        recovery_mode=recovery_mode,
+    )
     categorie_principale, _ = classify_primary_category(categories_tags, categories_text, rules, stats)
-    ingredients_text = normalize_ingredients_text(product, rules, stats)
+    ingredients_text = normalize_ingredients_text(
+        product,
+        rules,
+        stats,
+        recovery_mode=recovery_mode,
+    )
 
     image_url = first_clean_text(
         product.get("image_url"),
@@ -1061,8 +1170,8 @@ def build_row(product: dict[str, Any], stats: dict[str, int], rules: dict[str, A
     return {
         "code": code,
         "last_modified_t": clean_int(product.get("last_modified_t")),
-        "product_name": clean_text(product.get("product_name")) or clean_text(product.get("product_name_fr")),
-        "brands": normalize_brands(product),
+        "product_name": pick_product_name(product, recovery_mode=recovery_mode),
+        "brands": normalize_brands(product, recovery_mode=recovery_mode),
         "quantity": quantity_text,
         "quantity_value": quantity_value,
         "quantity_unit": quantity_unit,
@@ -1093,7 +1202,75 @@ def build_row(product: dict[str, Any], stats: dict[str, int], rules: dict[str, A
         "image_url": image_url,
         "image_small_url": image_small_url,
         "image_nutrition_url": image_nutrition_url,
-    }
+}
+
+
+def quantity_is_final(row: dict[str, Any]) -> bool:
+    quantity = clean_text(row.get("quantity"))
+    if quantity is None:
+        return True
+    return clean_float(row.get("quantity_value")) is not None and clean_text(row.get("quantity_unit")) is not None
+
+
+def nutriscore_is_final(row: dict[str, Any]) -> bool:
+    grade = normalize_nutrition_grade(row.get("nutriscore_grade"))
+    score = clean_int(row.get("nutriscore_score"))
+    if grade is None and score is None:
+        return True
+    if grade is None or score is None:
+        return False
+    return score_matches_grade(grade, score)
+
+
+def energy_is_final(row: dict[str, Any]) -> bool:
+    energy = clean_float(row.get("energy_100g"))
+    energy_kj = clean_float(row.get("energy_kj_100g"))
+    energy_kcal = clean_float(row.get("energy_kcal_100g"))
+    if energy is None and energy_kj is None and energy_kcal is None:
+        return True
+    norm_energy, norm_kj, norm_kcal = harmonize_energy(
+        energy,
+        energy_kj,
+        energy_kcal,
+        stats={"energy_imputed": 0, "energy_corrected": 0},
+    )
+    return energy == norm_energy and energy_kj == norm_kj and energy_kcal == norm_kcal
+
+
+def salt_sodium_is_final(row: dict[str, Any]) -> bool:
+    salt = clean_float(row.get("salt_100g"))
+    sodium = clean_float(row.get("sodium_100g"))
+    if salt is None and sodium is None:
+        return True
+    norm_salt, norm_sodium = harmonize_salt_sodium(
+        salt,
+        sodium,
+        stats={"salt_imputed": 0, "sodium_imputed": 0, "sodium_corrected": 0},
+    )
+    return salt == norm_salt and sodium == norm_sodium
+
+
+def evaluate_final_contract(row: dict[str, Any]) -> list[str]:
+    issues = []
+
+    if normalize_code(row.get("code")) is None:
+        issues.append("missing_code")
+    if clean_text(row.get("product_name")) is None:
+        issues.append("missing_product_name")
+    if clean_text(row.get("categories")) is None:
+        issues.append("missing_categories")
+    if clean_text(row.get("categorie_principale")) is None:
+        issues.append("missing_categorie_principale")
+    if not quantity_is_final(row):
+        issues.append("quantity_not_standardized")
+    if not nutriscore_is_final(row):
+        issues.append("nutriscore_inconsistent")
+    if not energy_is_final(row):
+        issues.append("energy_inconsistent")
+    if not salt_sodium_is_final(row):
+        issues.append("salt_sodium_inconsistent")
+
+    return issues
 
 
 def parse_products(body: str) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -1156,7 +1333,7 @@ def transform_products(products: list[dict[str, Any]], rules: dict[str, Any]) ->
     rows_without_code: list[dict[str, Any]] = []
 
     for product in products:
-        row = build_row(product, stats=stats, rules=rules)
+        row = build_row(product, stats=stats, rules=rules, recovery_mode=True)
         code = row.get("code")
         if code is None:
             rows_without_code.append(row)
@@ -1242,7 +1419,7 @@ def stream_transform_to_parquet(
                 continue
 
             transform_stats["rows_input"] += 1
-            row = build_row(obj, stats=transform_stats, rules=rules)
+            row = build_row(obj, stats=transform_stats, rules=rules, recovery_mode=True)
             code = row.get("code")
             if code is None:
                 transform_stats["rows_without_code"] += 1

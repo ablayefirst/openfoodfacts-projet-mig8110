@@ -170,7 +170,7 @@ def _login_ui():
 
 
 def _logout_ui():
-    if st.sidebar.button("Logout"):
+    if st.button("Logout", type="secondary"):
         st.session_state.pop("admin_ok", None)
         st.session_state.pop("admin_mode", None)
         st.session_state.pop("admin_code", None)
@@ -512,7 +512,7 @@ def run_admin():
         _login_ui()
         return
 
-    st.sidebar.success("Connecté en admin ✅")
+    st.success("Connecte en admin")
     _logout_ui()
 
     mode = st.session_state.get("admin_mode", "list")

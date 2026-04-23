@@ -1,10 +1,17 @@
+import os
+
 import pandas as pd
 from sqlalchemy import create_engine, text
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 
-DATABASE_URL = "postgresql+psycopg://postgres:postgres123@postgres:5432/openfood_db"
-print("DATABASE_URL utilisée = postgresql+psycopg://postgres:***@postgres:5432/openfood_db")
+
+def get_database_url() -> str:
+    driver = os.getenv("POSTGRES_SQLALCHEMY_DRIVER", "postgresql+psycopg2")
+    host = os.getenv("POSTGRES_HOST", "postgres")
+    port = os.getenv("POSTGRES_PORT", "5432")
+    db = os.getenv("POSTGRES_DB", "openfood_db")
+    user = os.getenv("POSTGRES_USER", "postgres")
+    password = os.getenv("POSTGRES_PASSWORD", "postgres123")
+    return f"{driver}://{user}:{password}@{host}:{port}/{db}"
 
 # =========================================================
 # PARAMÈTRES DE GÉNÉRATION
@@ -763,12 +770,53 @@ def make_result_row_from_dict(a, b, score, nb_commons, commons_sorted, methode, 
     }
 
 
+def ensure_similarity_table(conn) -> None:
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS produit_similaire (
+                code_produit_source TEXT REFERENCES produit(code_produit) ON DELETE CASCADE,
+                code_produit_cible TEXT REFERENCES produit(code_produit) ON DELETE CASCADE,
+                type_recommandation TEXT NOT NULL,
+                score_similarite NUMERIC,
+                nb_ingredients_communs INTEGER,
+                ingredients_communs TEXT,
+                methode TEXT,
+                health_score_source NUMERIC,
+                health_score_cible NUMERIC,
+                PRIMARY KEY (code_produit_source, code_produit_cible, type_recommandation)
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_produit_similaire_source_type
+            ON produit_similaire(code_produit_source, type_recommandation)
+            """
+        )
+    )
+
+
 # ==============================
 # 3. Main
 # ==============================
 
-def main():
-    engine = create_engine(DATABASE_URL)
+def build_similarity_recommendations(**_):
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    database_url = get_database_url()
+    print(
+        "DATABASE_URL utilisée = "
+        f"{os.getenv('POSTGRES_SQLALCHEMY_DRIVER', 'postgresql+psycopg2')}://"
+        f"{os.getenv('POSTGRES_USER', 'postgres')}:***@"
+        f"{os.getenv('POSTGRES_HOST', 'postgres')}:"
+        f"{os.getenv('POSTGRES_PORT', '5432')}/"
+        f"{os.getenv('POSTGRES_DB', 'openfood_db')}"
+    )
+    engine = create_engine(database_url)
 
     df = pd.read_sql(QUERY, engine)
 
@@ -1092,6 +1140,7 @@ def main():
     # ==============================
 
     with engine.begin() as conn:
+        ensure_similarity_table(conn)
         conn.execute(text("DELETE FROM produit_similaire"))
         if not result_df.empty:
             result_df.to_sql("produit_similaire", conn, if_exists="append", index=False)

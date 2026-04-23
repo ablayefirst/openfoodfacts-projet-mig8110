@@ -81,6 +81,14 @@ CREATE TABLE IF NOT EXISTS produit_categorie (
     PRIMARY KEY (code_produit, id_categorie)
 );
 
+
+CREATE TABLE IF NOT EXISTS synonyme_ingredient (
+    id_synonyme SERIAL PRIMARY KEY,
+    nom_synonyme TEXT,
+    id_ingredient INT REFERENCES ingredient(id_ingredient)
+);
+
+
 CREATE TABLE IF NOT EXISTS produit_ingredient (
     code_produit TEXT REFERENCES produit(code_produit) ON DELETE CASCADE,
     id_ingredient INTEGER REFERENCES ingredient(id_ingredient) ON DELETE CASCADE,
@@ -123,6 +131,23 @@ CREATE TABLE IF NOT EXISTS etl_import_history (
 );
 
 -- =====================================================
+-- RECOMMANDATIONS PRODUITS
+-- =====================================================
+
+CREATE TABLE IF NOT EXISTS produit_similaire (
+    code_produit_source TEXT REFERENCES produit(code_produit) ON DELETE CASCADE,
+    code_produit_cible TEXT REFERENCES produit(code_produit) ON DELETE CASCADE,
+    type_recommandation TEXT NOT NULL,
+    score_similarite NUMERIC,
+    nb_ingredients_communs INTEGER,
+    ingredients_communs TEXT,
+    methode TEXT,
+    health_score_source NUMERIC,
+    health_score_cible NUMERIC,
+    PRIMARY KEY (code_produit_source, code_produit_cible, type_recommandation)
+);
+
+-- =====================================================
 -- INDEX POUR PERFORMANCE (APP WEB + ETL)
 -- =====================================================
 
@@ -157,3 +182,5 @@ WHERE sugars_100g IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_etl_import_history_imported_at ON etl_import_history(imported_at);
 CREATE INDEX IF NOT EXISTS idx_etl_import_history_type_end_ts ON etl_import_history(import_type, source_end_ts);
+CREATE INDEX IF NOT EXISTS idx_produit_similaire_source_type
+ON produit_similaire(code_produit_source, type_recommandation);
