@@ -10,25 +10,39 @@ print("DATABASE_URL utilisée = postgresql+psycopg://postgres:***@postgres:5432/
 # PARAMÈTRES DE GÉNÉRATION
 #
 # MODES DE SIMILARITÉ GÉNÉRÉS :
-# - "ingredients" : similarité basée sur les ingrédients (Jaccard)
-# - "tfidf"       : similarité basée sur la composition textuelle (TF-IDF + cosine)
-# - "categorie"   : similarité basée uniquement sur la même catégorie
+# - "meme_categorie"              : même catégorie principale
+# - "profil_nutritionnel"         : proximité nutritionnelle
+# - "score_nutritionnel_global"   : proximité NutriScore
+# - "niveau_transformation_nova"  : proximité NOVA
 #
-# MODES "PLUS SAIN" GÉNÉRÉS :
-# - "score_global"    : meilleur score santé OMS
-# - "moins_sucre"     : moins de sucre
-# - "moins_sel"       : moins de sel
-# - "moins_saturees"  : moins de graisses saturées
-# - "multi_criteres"  : logique complète OMS + NutriScore + NOVA
+# RECOMMANDATIONS GÉNÉRÉES :
+# - "similaire"
+# - "plus_saine"
+#
+# LOGIQUE FINALE :
+# - similaires et plus saines sont indépendants
+# - un produit peut être plus sain sans être retenu comme similaire
 # =========================================================
-SIMILARITY_MODES = ["ingredients", "tfidf", "categorie"]
-HEALTHIER_MODES = [
-    "score_global",
-    "moins_sucre",
-    "moins_sel",
-    "moins_saturees",
-    "multi_criteres"
+SIMILARITY_MODES = [
+    "meme_categorie",
+    "profil_nutritionnel",
+    "score_nutritionnel_global",
+    "niveau_transformation_nova",
 ]
+
+RECOMMENDATION_TYPES = [
+    "similaire",
+    "plus_saine"
+]
+
+# Seuils de filtrage
+PROFILE_NUTRITIONNEL_MIN_SCORE = 0.35
+SCORE_NUTRITIONNEL_GLOBAL_MIN_SCORE = 0.50
+NIVEAU_TRANSFORMATION_NOVA_MIN_SCORE = 0.50
+
+# Seuils santé
+MIN_HEALTH_GAIN = 3.0
+MIN_IMPROVEMENTS = 2
 
 # ==============================
 # 1. Charger produits
@@ -40,12 +54,15 @@ SELECT
     p.nom_produit,
     p.categorie_principale,
     p.nutrition_grade,
+    p.nutriscore_score,
     p.nova_group,
     v.sugars_100g,
     v.salt_100g,
     v.saturated_fat_100g,
     v.fiber_100g,
     v.proteins_100g,
+    v.carbohydrates_100g,
+    v.fat_100g,
     COALESCE(string_agg(DISTINCT ing.ingredients_nom, ', '), '') AS ingredients_text
 FROM produit p
 LEFT JOIN valeurs_nutritionnelles v ON p.code_produit = v.code_produit
@@ -56,17 +73,38 @@ GROUP BY
     p.nom_produit,
     p.categorie_principale,
     p.nutrition_grade,
+    p.nutriscore_score,
     p.nova_group,
     v.sugars_100g,
     v.salt_100g,
     v.saturated_fat_100g,
     v.fiber_100g,
-    v.proteins_100g
+    v.proteins_100g,
+    v.carbohydrates_100g,
+    v.fat_100g
 """
 
 # ==============================
 # 2. Fonctions utilitaires
 # ==============================
+
+def safe_float(value, default=None):
+    try:
+        if value is None or pd.isna(value):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def safe_int(value, default=None):
+    try:
+        if value is None or pd.isna(value):
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 
 def nutriscore_value(grade):
     mapping = {
@@ -77,46 +115,6 @@ def nutriscore_value(grade):
         "E": 1
     }
     return mapping.get(str(grade).upper(), 0)
-
-
-def category_bonus(cat_a, cat_b):
-    if not cat_a or not cat_b:
-        return 0.0
-
-    if str(cat_a).strip().lower() == str(cat_b).strip().lower():
-        return 0.1
-
-    return 0.0
-
-
-def quality_bonus(source_grade, target_grade, source_nova, target_nova):
-    bonus = 0.0
-
-    source_grade_value = nutriscore_value(source_grade)
-    target_grade_value = nutriscore_value(target_grade)
-
-    # Bonus / malus sur NutriScore
-    if target_grade_value > source_grade_value:
-        bonus += 0.10
-    elif target_grade_value == source_grade_value:
-        bonus += 0.03
-    elif target_grade_value < source_grade_value:
-        bonus -= 0.10
-
-    # Bonus / malus sur NOVA
-    try:
-        if source_nova is not None and target_nova is not None:
-            source_nova = int(source_nova)
-            target_nova = int(target_nova)
-
-            if target_nova < source_nova:
-                bonus += 0.05
-            elif target_nova > source_nova:
-                bonus -= 0.02
-    except Exception:
-        pass
-
-    return bonus
 
 
 def compute_health_score(sugar, salt, fat_sat, fiber, proteins, nova, nutriscore):
@@ -135,8 +133,6 @@ def compute_health_score(sugar, salt, fat_sat, fiber, proteins, nova, nutriscore
 
     score = 100.0
 
-    # Repères utilisés dans le scoring
-    # (adaptés pour évaluer un produit à partir de ses valeurs /100g)
     WHO_SUGAR_IDEAL = 25.0
     WHO_SUGAR_MAX = 50.0
     WHO_SALT_MAX = 5.0
@@ -283,10 +279,201 @@ def compute_health_score(sugar, salt, fat_sat, fiber, proteins, nova, nutriscore
     except Exception:
         pass
 
-    # Bornage final
     score = max(0, min(100, score))
-
     return round(score, 4)
+
+
+def clean(text):
+    if not text:
+        return []
+
+    text = str(text).lower().replace("(", ",").replace(")", ",")
+    tokens = [t.strip() for t in text.split(",")]
+
+    cleaned = []
+    seen = set()
+
+    for token in tokens:
+        if len(token) > 2 and token not in seen:
+            seen.add(token)
+            cleaned.append(token)
+
+    return cleaned
+
+
+def jaccard_from_sets(a_set, b_set):
+    if not (a_set | b_set):
+        return 0.0
+    return len(a_set & b_set) / len(a_set | b_set)
+
+
+def similarity_method_label(mode):
+    if mode == "meme_categorie":
+        return "meme_categorie"
+    if mode == "profil_nutritionnel":
+        return "profil_nutritionnel"
+    if mode == "score_nutritionnel_global":
+        return "score_nutritionnel_global"
+    if mode == "niveau_transformation_nova":
+        return "niveau_transformation_nova"
+    return "mode_inconnu"
+
+
+def build_product_dict(row):
+    return {
+        "code_produit": row.code_produit,
+        "nom_produit": row.nom_produit,
+        "categorie_principale": row.categorie_principale,
+        "nutrition_grade": row.nutrition_grade,
+        "nutriscore_score": row.nutriscore_score,
+        "nova_group": row.nova_group,
+        "sugars_100g": row.sugars_100g,
+        "salt_100g": row.salt_100g,
+        "saturated_fat_100g": row.saturated_fat_100g,
+        "fiber_100g": row.fiber_100g,
+        "proteins_100g": row.proteins_100g,
+        "carbohydrates_100g": row.carbohydrates_100g,
+        "fat_100g": row.fat_100g,
+        "health_score": row.health_score,
+        "ingredients_text": row.ingredients_text,
+        "ingredients_clean": row.ingredients_clean,
+        "ingredients_set": row.ingredients_set,
+        "doc": row.doc,
+        "category_norm": row.category_norm,
+    }
+
+
+def category_similarity(a, b):
+    a_cat = str(a["categorie_principale"]).strip().lower() if pd.notna(a["categorie_principale"]) else ""
+    b_cat = str(b["categorie_principale"]).strip().lower() if pd.notna(b["categorie_principale"]) else ""
+
+    if a_cat != "" and a_cat == b_cat:
+        return 1.0
+    return 0.0
+
+
+def nutrition_similarity(a, b):
+    a_sugar = safe_float(a["sugars_100g"], 0.0)
+    b_sugar = safe_float(b["sugars_100g"], 0.0)
+
+    a_salt = safe_float(a["salt_100g"], 0.0)
+    b_salt = safe_float(b["salt_100g"], 0.0)
+
+    a_sat = safe_float(a["saturated_fat_100g"], 0.0)
+    b_sat = safe_float(b["saturated_fat_100g"], 0.0)
+
+    a_fiber = safe_float(a["fiber_100g"], 0.0)
+    b_fiber = safe_float(b["fiber_100g"], 0.0)
+
+    a_protein = safe_float(a["proteins_100g"], 0.0)
+    b_protein = safe_float(b["proteins_100g"], 0.0)
+
+    distance = (
+        abs(a_sugar - b_sugar) * 0.30 +
+        abs(a_salt - b_salt) * 0.25 +
+        abs(a_sat - b_sat) * 0.20 +
+        abs(a_fiber - b_fiber) * 0.15 +
+        abs(a_protein - b_protein) * 0.10
+    )
+
+    return round(1 / (1 + distance), 4)
+
+
+def global_score_similarity(a, b):
+    a_nutri = nutriscore_value(a["nutrition_grade"])
+    b_nutri = nutriscore_value(b["nutrition_grade"])
+
+    score = 1 - (abs(a_nutri - b_nutri) / 4)
+    return round(max(0, score), 4)
+
+
+def nova_similarity(a, b):
+    a_nova = safe_int(a["nova_group"], 4)
+    b_nova = safe_int(b["nova_group"], 4)
+
+    score = 1 - (abs(a_nova - b_nova) / 3)
+    return round(max(0, score), 4)
+
+
+def compute_similarity_by_mode(a, b, mode):
+    if mode == "meme_categorie":
+        return category_similarity(a, b)
+
+    if mode == "profil_nutritionnel":
+        return nutrition_similarity(a, b)
+
+    if mode == "score_nutritionnel_global":
+        return global_score_similarity(a, b)
+
+    if mode == "niveau_transformation_nova":
+        return nova_similarity(a, b)
+
+    return 0.0
+
+
+def passes_similarity_threshold(mode, score):
+    if mode == "meme_categorie":
+        return score > 0
+
+    if mode == "profil_nutritionnel":
+        return score >= PROFILE_NUTRITIONNEL_MIN_SCORE
+
+    if mode == "score_nutritionnel_global":
+        return score >= SCORE_NUTRITIONNEL_GLOBAL_MIN_SCORE
+
+    if mode == "niveau_transformation_nova":
+        return score >= NIVEAU_TRANSFORMATION_NOVA_MIN_SCORE
+
+    return False
+
+
+def count_improvements(a, b):
+    improvements = 0
+
+    try:
+        a_sugar = safe_float(a["sugars_100g"], None)
+        b_sugar = safe_float(b["sugars_100g"], None)
+        if a_sugar is not None and b_sugar is not None and b_sugar < a_sugar:
+            improvements += 1
+    except Exception:
+        pass
+
+    try:
+        a_salt = safe_float(a["salt_100g"], None)
+        b_salt = safe_float(b["salt_100g"], None)
+        if a_salt is not None and b_salt is not None and b_salt < a_salt:
+            improvements += 1
+    except Exception:
+        pass
+
+    try:
+        a_sat = safe_float(a["saturated_fat_100g"], None)
+        b_sat = safe_float(b["saturated_fat_100g"], None)
+        if a_sat is not None and b_sat is not None and b_sat < a_sat:
+            improvements += 1
+    except Exception:
+        pass
+
+    try:
+        a_fiber = safe_float(a["fiber_100g"], None)
+        b_fiber = safe_float(b["fiber_100g"], None)
+        if a_fiber is not None and b_fiber is not None and b_fiber > a_fiber:
+            improvements += 1
+    except Exception:
+        pass
+
+    try:
+        a_protein = safe_float(a["proteins_100g"], None)
+        b_protein = safe_float(b["proteins_100g"], None)
+        if a_protein is not None and b_protein is not None and b_protein > a_protein:
+            improvements += 1
+    except Exception:
+        pass
+
+    if nutriscore_value(b["nutrition_grade"]) > nutriscore_value(a["nutrition_grade"]):
+        improvements += 1
+
+    return improvements
 
 
 def is_healthier(
@@ -310,11 +497,9 @@ def is_healthier(
     source_nutri = nutriscore_value(source_grade)
     target_nutri = nutriscore_value(target_grade)
 
-    # 1. Le produit cible ne doit pas être pire en NutriScore
     if target_nutri < source_nutri:
         return False
 
-    # 2. Le produit cible ne doit pas être pire en NOVA
     try:
         if source_nova is not None and target_nova is not None:
             if int(target_nova) > int(source_nova):
@@ -322,13 +507,9 @@ def is_healthier(
     except Exception:
         pass
 
-    # 3. Le score santé global doit être strictement meilleur
     if target_health_score <= source_health_score:
         return False
 
-    # 4. Garde-fous critiques :
-    # on refuse "plus sain" si le produit cible est nettement pire
-    # sur des critères critiques
     try:
         if source_sugar is not None and target_sugar is not None:
             if pd.notna(source_sugar) and pd.notna(target_sugar):
@@ -353,7 +534,6 @@ def is_healthier(
     except Exception:
         pass
 
-    # 5. Compter les améliorations nettes
     improvements = 0
 
     try:
@@ -399,10 +579,6 @@ def is_healthier(
     if target_nutri > source_nutri:
         improvements += 1
 
-    # 6. Détection des cas de compromis / trade-off :
-    # si le produit cible améliore certains critères
-    # mais le produit source reste meilleur sur d'autres critères majeurs,
-    # on évite de dire trop vite "plus sain"
     source_advantages = 0
     target_advantages = 0
 
@@ -456,60 +632,28 @@ def is_healthier(
     except Exception:
         pass
 
-    # Si chaque produit a plusieurs avantages majeurs,
-    # on considère que c'est un compromis nutritionnel,
-    # donc pas une vraie alternative "plus saine"
     if target_advantages >= 2 and source_advantages >= 2:
         return False
 
-    # 7. Exiger au moins 2 améliorations nettes
-    if improvements < 2:
+    if improvements < MIN_IMPROVEMENTS:
         return False
 
-    # 8. Le gain global doit aussi être significatif
-    if (target_health_score - source_health_score) < 3:
+    if (target_health_score - source_health_score) < MIN_HEALTH_GAIN:
         return False
 
     return True
 
 
 def is_healthier_by_mode(a, b, mode):
-    """
-    Détermine si b est une alternative plus saine que a
-    selon le mode choisi par l'utilisateur.
-    """
-
     try:
-        if mode == "score_global":
-            return (
-                pd.notna(a["health_score"]) and
-                pd.notna(b["health_score"]) and
-                float(b["health_score"]) > float(a["health_score"])
-            )
+        if b["health_score"] <= a["health_score"]:
+            return False
 
-        elif mode == "moins_sucre":
-            return (
-                pd.notna(a["sugars_100g"]) and
-                pd.notna(b["sugars_100g"]) and
-                float(b["sugars_100g"]) < float(a["sugars_100g"])
-            )
+        if mode == "meme_categorie":
+            if category_similarity(a, b) <= 0:
+                return False
 
-        elif mode == "moins_sel":
-            return (
-                pd.notna(a["salt_100g"]) and
-                pd.notna(b["salt_100g"]) and
-                float(b["salt_100g"]) < float(a["salt_100g"])
-            )
-
-        elif mode == "moins_saturees":
-            return (
-                pd.notna(a["saturated_fat_100g"]) and
-                pd.notna(b["saturated_fat_100g"]) and
-                float(b["saturated_fat_100g"]) < float(a["saturated_fat_100g"])
-            )
-
-        elif mode == "multi_criteres":
-            return is_healthier(
+            if not is_healthier(
                 a["nutrition_grade"],
                 b["nutrition_grade"],
                 a["nova_group"],
@@ -526,234 +670,97 @@ def is_healthier_by_mode(a, b, mode):
                 b["fiber_100g"],
                 a["proteins_100g"],
                 b["proteins_100g"],
-            )
+            ):
+                return False
+
+            return True
+
+        elif mode == "profil_nutritionnel":
+            improvements = count_improvements(a, b)
+
+            if improvements < MIN_IMPROVEMENTS:
+                return False
+
+            if (b["health_score"] - a["health_score"]) < MIN_HEALTH_GAIN:
+                return False
+
+            return True
+
+        elif mode == "score_nutritionnel_global":
+            source_nutri = nutriscore_value(a["nutrition_grade"])
+            target_nutri = nutriscore_value(b["nutrition_grade"])
+
+            if target_nutri < source_nutri:
+                return False
+
+            if (b["health_score"] - a["health_score"]) < MIN_HEALTH_GAIN:
+                return False
+
+            return True
+
+        elif mode == "niveau_transformation_nova":
+            source_nova = safe_int(a["nova_group"], 4)
+            target_nova = safe_int(b["nova_group"], 4)
+
+            if target_nova > source_nova:
+                return False
+
+            if (b["health_score"] - a["health_score"]) < MIN_HEALTH_GAIN:
+                return False
+
+            return True
+
+        return is_healthier(
+            a["nutrition_grade"],
+            b["nutrition_grade"],
+            a["nova_group"],
+            b["nova_group"],
+            a["health_score"],
+            b["health_score"],
+            a["sugars_100g"],
+            b["sugars_100g"],
+            a["salt_100g"],
+            b["salt_100g"],
+            a["saturated_fat_100g"],
+            b["saturated_fat_100g"],
+            a["fiber_100g"],
+            b["fiber_100g"],
+            a["proteins_100g"],
+            b["proteins_100g"],
+        )
 
     except Exception:
         return False
 
-    return False
 
-
-def clean(text):
-    if not text:
-        return []
-
-    text = str(text).lower().replace("(", ",").replace(")", ",")
-    tokens = [t.strip() for t in text.split(",")]
-
-    cleaned = []
-    seen = set()
-
-    for token in tokens:
-        if len(token) > 2 and token not in seen:
-            seen.add(token)
-            cleaned.append(token)
-
-    return cleaned
-
-
-def jaccard(a, b):
-    a, b = set(a), set(b)
-    if not (a | b):
-        return 0
-    return len(a & b) / len(a | b)
-
-
-def compute_similarity_score(mode, cos, jac, same_category):
-    """
-    Calcule le score de similarité selon le mode choisi.
-    """
-
-    if mode == "ingredients":
-        return jac
-
-    if mode == "tfidf":
-        return cos
-
-    if mode == "categorie":
-        return 1.0 if same_category else 0.0
-
-    raise ValueError(f"Mode de similarité inconnu : {mode}")
-
-
-def similarity_method_label(mode):
-    if mode == "ingredients":
-        return "ingredients_jaccard"
-    if mode == "tfidf":
-        return "composition_avancee_tfidf"
-    if mode == "categorie":
-        return "meme_categorie"
-    return "mode_inconnu"
-
-
-def healthier_mode_label(mode):
-    mapping = {
-        "score_global": "score_global",
-        "moins_sucre": "moins_sucre",
-        "moins_sel": "moins_sel",
-        "moins_saturees": "moins_saturees",
-        "multi_criteres": "multi_criteres",
+def make_result_row(a, b, score, nb_commons, commons_sorted, methode, mode_sante, type_recommandation):
+    return {
+        "code_produit_source": a.code_produit,
+        "code_produit_cible": b.code_produit,
+        "score_similarite": round(float(score), 4),
+        "nb_ingredients_communs": nb_commons,
+        "ingredients_communs": ", ".join(commons_sorted[:8]),
+        "methode": methode,
+        "mode_sante": mode_sante,
+        "type_recommandation": type_recommandation,
+        "health_score_source": a.health_score,
+        "health_score_cible": b.health_score
     }
-    return mapping.get(mode, "mode_sante_inconnu")
 
 
-def generate_recommendations_for_mode(df, sim_matrix, similarity_mode, healthier_mode):
-    similar_results = []
-    healthier_results = []
-
-    print("===================================================")
-    print("Mode de similarité en cours :", similarity_mode)
-    print("Mode plus sain :", healthier_mode)
-    print("===================================================")
-
-    for i, a in df.iterrows():
-        for j, b in df.iterrows():
-            if i == j:
-                continue
-
-            same_category = (
-                str(a["categorie_principale"]).strip().lower() ==
-                str(b["categorie_principale"]).strip().lower()
-            )
-
-            # Mode "categorie" : on ne garde que les produits de la même catégorie
-            if similarity_mode == "categorie" and not same_category:
-                continue
-
-            cos = sim_matrix[i, j]
-            jac = jaccard(a["ingredients_clean"], b["ingredients_clean"])
-
-            health_score_a = compute_health_score(
-                a["sugars_100g"],
-                a["salt_100g"],
-                a["saturated_fat_100g"],
-                a["fiber_100g"],
-                a["proteins_100g"],
-                a["nova_group"],
-                a["nutrition_grade"]
-            )
-
-            health_score_b = compute_health_score(
-                b["sugars_100g"],
-                b["salt_100g"],
-                b["saturated_fat_100g"],
-                b["fiber_100g"],
-                b["proteins_100g"],
-                b["nova_group"],
-                b["nutrition_grade"]
-            )
-
-            a_data = {
-                "code_produit": a["code_produit"],
-                "nutrition_grade": a["nutrition_grade"],
-                "nova_group": a["nova_group"],
-                "sugars_100g": a["sugars_100g"],
-                "salt_100g": a["salt_100g"],
-                "saturated_fat_100g": a["saturated_fat_100g"],
-                "fiber_100g": a["fiber_100g"],
-                "proteins_100g": a["proteins_100g"],
-                "health_score": health_score_a
-            }
-
-            b_data = {
-                "code_produit": b["code_produit"],
-                "nutrition_grade": b["nutrition_grade"],
-                "nova_group": b["nova_group"],
-                "sugars_100g": b["sugars_100g"],
-                "salt_100g": b["salt_100g"],
-                "saturated_fat_100g": b["saturated_fat_100g"],
-                "fiber_100g": b["fiber_100g"],
-                "proteins_100g": b["proteins_100g"],
-                "health_score": health_score_b
-            }
-
-            score = compute_similarity_score(
-                similarity_mode,
-                cos,
-                jac,
-                same_category
-            )
-
-            commons = list(set(a["ingredients_clean"]) & set(b["ingredients_clean"]))
-            commons_sorted = sorted(commons)
-
-            # ------------------------------
-            # Garde-fous selon le mode choisi
-            # ------------------------------
-            if similarity_mode == "ingredients":
-                if len(commons_sorted) < 2:
-                    continue
-                if score < 0.20:
-                    continue
-
-            elif similarity_mode == "tfidf":
-                if score < 0.20:
-                    continue
-
-            elif similarity_mode == "categorie":
-                if not same_category:
-                    continue
-
-            # ------------------------------
-            # Recommandations similaires
-            # ------------------------------
-            similar_results.append({
-                "code_produit_source": a["code_produit"],
-                "code_produit_cible": b["code_produit"],
-                "score_similarite": round(float(score), 4),
-                "nb_ingredients_communs": len(commons_sorted),
-                "ingredients_communs": ", ".join(commons_sorted[:8]),
-                "methode": similarity_method_label(similarity_mode),
-                "mode_sante": healthier_mode_label(healthier_mode),
-                "type_recommandation": "similaire",
-                "health_score_source": health_score_a,
-                "health_score_cible": health_score_b
-            })
-
-            # ------------------------------
-            # Recommandations plus saines
-            # ------------------------------
-            is_better = is_healthier_by_mode(a_data, b_data, healthier_mode)
-
-            if is_better:
-                healthier_results.append({
-                    "code_produit_source": a["code_produit"],
-                    "code_produit_cible": b["code_produit"],
-                    "score_similarite": round(float(score), 4),
-                    "nb_ingredients_communs": len(commons_sorted),
-                    "ingredients_communs": ", ".join(commons_sorted[:8]),
-                    "methode": similarity_method_label(similarity_mode),
-                    "mode_sante": healthier_mode_label(healthier_mode),
-                    "type_recommandation": "plus_saine",
-                    "health_score_source": health_score_a,
-                    "health_score_cible": health_score_b
-                })
-
-    similar_df = pd.DataFrame(similar_results)
-    healthier_df = pd.DataFrame(healthier_results)
-
-    print(f"[{similarity_mode} | {healthier_mode}] Total recommandations similaires :", len(similar_df))
-    print(f"[{similarity_mode} | {healthier_mode}] Total recommandations plus saines :", len(healthier_df))
-
-    # Top 5 pour chaque produit source et chaque type
-    if not similar_df.empty:
-        similar_df = similar_df.sort_values(
-            ["code_produit_source", "score_similarite"],
-            ascending=[True, False]
-        )
-        similar_df = similar_df.groupby("code_produit_source").head(5).reset_index(drop=True)
-
-    if not healthier_df.empty:
-        healthier_df = healthier_df.sort_values(
-            ["code_produit_source", "score_similarite"],
-            ascending=[True, False]
-        )
-        healthier_df = healthier_df.groupby("code_produit_source").head(5).reset_index(drop=True)
-
-    print(f"[{similarity_mode} | {healthier_mode}] Top similaires gardés :", len(similar_df))
-    print(f"[{similarity_mode} | {healthier_mode}] Top plus saines gardés :", len(healthier_df))
-
-    return similar_df, healthier_df
+def make_result_row_from_dict(a, b, score, nb_commons, commons_sorted, methode, mode_sante, type_recommandation):
+    return {
+        "code_produit_source": a["code_produit"],
+        "code_produit_cible": b["code_produit"],
+        "score_similarite": round(float(score), 4),
+        "nb_ingredients_communs": nb_commons,
+        "ingredients_communs": ", ".join(commons_sorted[:8]),
+        "methode": methode,
+        "mode_sante": mode_sante,
+        "type_recommandation": type_recommandation,
+        "health_score_source": a["health_score"],
+        "health_score_cible": b["health_score"]
+    }
 
 
 # ==============================
@@ -770,47 +777,220 @@ def main():
     # ==============================
 
     df["ingredients_clean"] = df["ingredients_text"].apply(clean)
+    df["ingredients_set"] = df["ingredients_clean"].apply(set)
+    df["doc"] = df["ingredients_clean"].apply(lambda x: " ".join(x))
+    df["category_norm"] = df["categorie_principale"].apply(
+        lambda x: str(x).strip().lower() if pd.notna(x) else ""
+    )
 
-    # Supprimer produits sans ingrédients
-    df = df[df["ingredients_clean"].apply(len) > 0].reset_index(drop=True)
+    # Conserve TF-IDF / ingrédients dans le script
+    vectorizer = TfidfVectorizer()
+    try:
+        X = vectorizer.fit_transform(df["doc"].fillna(""))
+        sim_matrix = cosine_similarity(X)
+    except Exception:
+        sim_matrix = None
+
+    df["health_score"] = df.apply(
+        lambda row: compute_health_score(
+            row["sugars_100g"],
+            row["salt_100g"],
+            row["saturated_fat_100g"],
+            row["fiber_100g"],
+            row["proteins_100g"],
+            row["nova_group"],
+            row["nutrition_grade"]
+        ),
+        axis=1
+    )
 
     print("Produits utilisés :", len(df))
     print("Modes de similarité à générer :", SIMILARITY_MODES)
-    print("Modes plus sains à générer :", HEALTHIER_MODES)
+    print("Types de recommandation :", RECOMMENDATION_TYPES)
 
-    # ==============================
-    # 5. Vectorisation TF-IDF
-    # ==============================
-
-    df["doc"] = df["ingredients_clean"].apply(lambda x: " ".join(x))
-
-    vectorizer = TfidfVectorizer()
-    X = vectorizer.fit_transform(df["doc"])
-
-    sim_matrix = cosine_similarity(X)
-
-    # ==============================
-    # 6. Calcul des recommandations
-    # ==============================
+    rows = list(df.itertuples(index=False))
+    rows_dict = [build_product_dict(r) for r in rows]
+    n = len(rows)
 
     all_results = []
 
-    for similarity_mode in SIMILARITY_MODES:
-        for healthier_mode in HEALTHIER_MODES:
-            similar_df, healthier_df = generate_recommendations_for_mode(
-                df=df,
-                sim_matrix=sim_matrix,
-                similarity_mode=similarity_mode,
-                healthier_mode=healthier_mode
-            )
+    # ==============================
+    # 5. Boucle unique sur les paires
+    # ==============================
 
-            mode_result_df = pd.concat([similar_df, healthier_df], ignore_index=True)
+    for i in range(n):
+        a = rows[i]
+        a_data = rows_dict[i]
 
-            if not mode_result_df.empty:
-                all_results.append(mode_result_df)
+        for j in range(n):
+            if i == j:
+                continue
+
+            b = rows[j]
+            b_data = rows_dict[j]
+
+            same_category = (a.category_norm == b.category_norm)
+            commons_set = a.ingredients_set & b.ingredients_set
+            commons_sorted = sorted(commons_set)
+            nb_commons = len(commons_sorted)
+            jac = jaccard_from_sets(a.ingredients_set, b.ingredients_set)
+
+            if sim_matrix is not None:
+                try:
+                    cos = float(sim_matrix[i, j])
+                except Exception:
+                    cos = 0.0
+            else:
+                cos = 0.0
+
+            # ==================================
+            # PARTIE A : RECOMMANDATIONS SIMILAIRES
+            # ==================================
+
+            # MODE 1 : MÊME CATÉGORIE
+            score_meme_categorie = compute_similarity_by_mode(a_data, b_data, "meme_categorie")
+
+            if passes_similarity_threshold("meme_categorie", score_meme_categorie):
+                all_results.append(
+                    make_result_row(
+                        a=a,
+                        b=b,
+                        score=score_meme_categorie,
+                        nb_commons=nb_commons,
+                        commons_sorted=commons_sorted,
+                        methode="meme_categorie",
+                        mode_sante="meme_categorie",
+                        type_recommandation="similaire"
+                    )
+                )
+
+            # MODE 2 : PROFIL NUTRITIONNEL
+            score_profil_nutritionnel = compute_similarity_by_mode(a_data, b_data, "profil_nutritionnel")
+
+            if passes_similarity_threshold("profil_nutritionnel", score_profil_nutritionnel):
+                all_results.append(
+                    make_result_row(
+                        a=a,
+                        b=b,
+                        score=score_profil_nutritionnel,
+                        nb_commons=nb_commons,
+                        commons_sorted=commons_sorted,
+                        methode="profil_nutritionnel",
+                        mode_sante="profil_nutritionnel",
+                        type_recommandation="similaire"
+                    )
+                )
+
+            # MODE 3 : SCORE NUTRITIONNEL GLOBAL
+            score_score_nutritionnel_global = compute_similarity_by_mode(a_data, b_data, "score_nutritionnel_global")
+
+            if passes_similarity_threshold("score_nutritionnel_global", score_score_nutritionnel_global):
+                all_results.append(
+                    make_result_row(
+                        a=a,
+                        b=b,
+                        score=score_score_nutritionnel_global,
+                        nb_commons=nb_commons,
+                        commons_sorted=commons_sorted,
+                        methode="score_nutritionnel_global",
+                        mode_sante="score_nutritionnel_global",
+                        type_recommandation="similaire"
+                    )
+                )
+
+            # MODE 4 : NIVEAU DE TRANSFORMATION NOVA
+            score_niveau_transformation_nova = compute_similarity_by_mode(a_data, b_data, "niveau_transformation_nova")
+
+            if passes_similarity_threshold("niveau_transformation_nova", score_niveau_transformation_nova):
+                all_results.append(
+                    make_result_row(
+                        a=a,
+                        b=b,
+                        score=score_niveau_transformation_nova,
+                        nb_commons=nb_commons,
+                        commons_sorted=commons_sorted,
+                        methode="niveau_transformation_nova",
+                        mode_sante="niveau_transformation_nova",
+                        type_recommandation="similaire"
+                    )
+                )
+
+            # ==================================
+            # PARTIE B : RECOMMANDATIONS PLUS SAINES
+            # ==================================
+            # IMPORTANT :
+            # elles sont indépendantes des recommandations "similaire"
+
+            # MODE 1 : MÊME CATÉGORIE + plus saine
+            score_meme_categorie_healthy = category_similarity(a_data, b_data)
+            if is_healthier_by_mode(a_data, b_data, "meme_categorie"):
+                all_results.append(
+                    make_result_row(
+                        a=a,
+                        b=b,
+                        score=score_meme_categorie_healthy,
+                        nb_commons=nb_commons,
+                        commons_sorted=commons_sorted,
+                        methode="meme_categorie",
+                        mode_sante="meme_categorie",
+                        type_recommandation="plus_saine"
+                    )
+                )
+
+            # MODE 2 : PROFIL NUTRITIONNEL + plus saine
+            score_profil_nutritionnel_healthy = nutrition_similarity(a_data, b_data)
+            if is_healthier_by_mode(a_data, b_data, "profil_nutritionnel"):
+                all_results.append(
+                    make_result_row(
+                        a=a,
+                        b=b,
+                        score=score_profil_nutritionnel_healthy,
+                        nb_commons=nb_commons,
+                        commons_sorted=commons_sorted,
+                        methode="profil_nutritionnel",
+                        mode_sante="profil_nutritionnel",
+                        type_recommandation="plus_saine"
+                    )
+                )
+
+            # MODE 3 : SCORE NUTRITIONNEL GLOBAL + plus saine
+            score_score_nutritionnel_global_healthy = global_score_similarity(a_data, b_data)
+            if is_healthier_by_mode(a_data, b_data, "score_nutritionnel_global"):
+                all_results.append(
+                    make_result_row(
+                        a=a,
+                        b=b,
+                        score=score_score_nutritionnel_global_healthy,
+                        nb_commons=nb_commons,
+                        commons_sorted=commons_sorted,
+                        methode="score_nutritionnel_global",
+                        mode_sante="score_nutritionnel_global",
+                        type_recommandation="plus_saine"
+                    )
+                )
+
+            # MODE 4 : NIVEAU DE TRANSFORMATION NOVA + plus saine
+            score_niveau_transformation_nova_healthy = nova_similarity(a_data, b_data)
+            if is_healthier_by_mode(a_data, b_data, "niveau_transformation_nova"):
+                all_results.append(
+                    make_result_row(
+                        a=a,
+                        b=b,
+                        score=score_niveau_transformation_nova_healthy,
+                        nb_commons=nb_commons,
+                        commons_sorted=commons_sorted,
+                        methode="niveau_transformation_nova",
+                        mode_sante="niveau_transformation_nova",
+                        type_recommandation="plus_saine"
+                    )
+                )
+
+    # ==============================
+    # 6. Création DataFrame
+    # ==============================
 
     if all_results:
-        result_df = pd.concat(all_results, ignore_index=True)
+        result_df = pd.DataFrame(all_results)
     else:
         result_df = pd.DataFrame(columns=[
             "code_produit_source",
@@ -825,10 +1005,74 @@ def main():
             "health_score_cible"
         ])
 
+    # ==============================
+    # 7. Suppression doublons éventuels
+    # ==============================
+
+    if not result_df.empty:
+        result_df = result_df.drop_duplicates(
+            subset=[
+                "code_produit_source",
+                "code_produit_cible",
+                "methode",
+                "mode_sante",
+                "type_recommandation"
+            ]
+        ).reset_index(drop=True)
+
+    # ==============================
+    # 8. Top 5 par source / méthode / mode_sante / type
+    # ==============================
+
+    if not result_df.empty:
+        result_df = result_df.sort_values(
+            ["code_produit_source", "methode", "mode_sante", "type_recommandation", "score_similarite"],
+            ascending=[True, True, True, True, False]
+        )
+
+        result_df = (
+            result_df
+            .groupby(
+                ["code_produit_source", "methode", "mode_sante", "type_recommandation"],
+                as_index=False,
+                group_keys=False
+            )
+            .head(5)
+            .reset_index(drop=True)
+        )
+
+    # ==============================
+    # 9. Logs de synthèse
+    # ==============================
+
+    print("===================================================")
+    print("SYNTHÈSE PAR MODE")
+    print("===================================================")
+
+    for sim_mode in SIMILARITY_MODES:
+        label_sim = similarity_method_label(sim_mode)
+
+        sim_count_final = 0
+        healthy_count_final = 0
+
+        if not result_df.empty:
+            sim_count_final = len(result_df[
+                (result_df["methode"] == label_sim) &
+                (result_df["type_recommandation"] == "similaire")
+            ])
+
+            healthy_count_final = len(result_df[
+                (result_df["methode"] == label_sim) &
+                (result_df["type_recommandation"] == "plus_saine")
+            ])
+
+        print(f"[{sim_mode}] Similaires retenus : {sim_count_final}")
+        print(f"[{sim_mode}] Plus saines retenues : {healthy_count_final}")
+
     print("Total final inséré :", len(result_df))
 
     # ==============================
-    # 7. Insertion en base
+    # 10. Aperçu
     # ==============================
 
     print("Colonnes result_df :", result_df.columns.tolist())
@@ -843,6 +1087,10 @@ def main():
             "health_score_cible"
         ]].head(20))
 
+    # ==============================
+    # 11. Insertion en base
+    # ==============================
+
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM produit_similaire"))
         if not result_df.empty:
@@ -850,7 +1098,6 @@ def main():
 
     print("✅ Recommandations similaires et plus saines enregistrées en base")
     print("✅ Modes générés :", ", ".join([similarity_method_label(m) for m in SIMILARITY_MODES]))
-    print("✅ Modes santé générés :", ", ".join([healthier_mode_label(m) for m in HEALTHIER_MODES]))
 
 
 if __name__ == "__main__":
