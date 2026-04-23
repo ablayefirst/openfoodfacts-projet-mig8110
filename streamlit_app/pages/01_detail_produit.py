@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from html import escape
 
 import streamlit as st
 import pandas as pd
@@ -10,17 +11,19 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from db_connection import get_connection
+from image_utils import get_no_image_data_uri
 from top_menu import render_top_menu
+from ui_hero import render_page_hero
 
 st.set_page_config(page_title="Détail produit", layout="wide", initial_sidebar_state="collapsed")
 
 render_top_menu("Dashboard")
 
-st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
-
-st.title("Détail du produit")
-
-st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
+render_page_hero(
+    kicker="Analyse produit",
+    title="Detail du produit",
+    subtitle="Consultez la fiche complete, les donnees nutritionnelles et les alternatives recommandees.",
+)
 
 conn = get_connection()
 
@@ -305,6 +308,284 @@ healthier_df = pd.read_sql(
 )
 similar_df = read_optional_recommendations(SIMILAR_PRODUCTS_QUERY, code)
 healthier_df = read_optional_recommendations(HEALTHIER_PRODUCTS_QUERY, code)
+
+# ==============================
+# FICHE PRODUIT (AFFICHEE AVANT ANALYSE)
+# ==============================
+
+st.markdown(
+    """
+    <style>
+    .product-sheet {
+        border: 1px solid rgba(15,118,110,0.22);
+        border-radius: 16px;
+        padding: 1rem 1.1rem;
+        background:
+            radial-gradient(300px 110px at 5% 0%, rgba(20,184,166,0.09), transparent 90%),
+            radial-gradient(320px 130px at 95% 100%, rgba(245,158,11,0.09), transparent 90%),
+            #ffffff;
+        box-shadow: 0 6px 18px rgba(15,23,42,0.06);
+        margin-bottom: 1rem;
+        display: flex;
+        flex-direction: column;
+    }
+    .product-sheet .product-image-frame {
+        flex: 1;
+    }
+    .product-title {
+        margin: 0;
+        font-size: 1.35rem;
+        font-weight: 800;
+        color: #0f172a;
+        line-height: 1.2;
+    }
+    .product-code {
+        margin-top: 0.3rem;
+        color: #64748b;
+        font-size: 0.9rem;
+    }
+    .info-chip {
+        display: inline-block;
+        margin: 0.2rem 0.35rem 0.2rem 0;
+        padding: 0.25rem 0.55rem;
+        border-radius: 999px;
+        border: 1px solid rgba(15,118,110,0.24);
+        background: rgba(20,184,166,0.08);
+        color: #0f172a;
+        font-size: 0.8rem;
+        font-weight: 600;
+    }
+    .nutri-badge {
+        display: inline-block;
+        padding: 4px 11px;
+        border-radius: 999px;
+        font-size: 0.84rem;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        margin-right: 0.35rem;
+    }
+    .nutri-a { background:#1a7f37; color:#fff; }
+    .nutri-b { background:#85c341; color:#fff; }
+    .nutri-c { background:#f7c948; color:#1a1a1a; }
+    .nutri-d { background:#ef8c14; color:#fff; }
+    .nutri-e { background:#e63e11; color:#fff; }
+    .nutri-na { background:#cbd5e1; color:#475569; }
+    .nova-badge {
+        display: inline-block;
+        padding: 4px 11px;
+        border-radius: 999px;
+        font-size: 0.82rem;
+        font-weight: 700;
+        color: #fff;
+        background: #0f766e;
+    }
+    .section-label {
+        margin: 0.35rem 0 0.15rem;
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: #0f766e;
+    }
+    .nutrition-box {
+        border: 1px solid rgba(148,163,184,0.3);
+        border-radius: 12px;
+        background: #f8fafc;
+        padding: 0.55rem 0.7rem;
+        margin-bottom: 0.45rem;
+    }
+    .nutrition-line {
+        margin: 0.18rem 0;
+        color: #0f172a;
+        font-size: 0.9rem;
+    }
+    .product-image-frame {
+        border: 1px solid rgba(148,163,184,0.3);
+        border-radius: 14px;
+        background: #f8fafc;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        height: 100%;
+        max-height: 790px;
+        min-height: 720px;
+    }
+    .product-image-frame img {
+        width: 100%;
+        height: auto;
+        object-fit: contain;
+    }
+    .analysis-card {
+        border: 1px solid rgba(15,118,110,0.22);
+        border-radius: 16px;
+        padding: 1rem 1.1rem;
+        background:
+            radial-gradient(280px 100px at 5% 0%, rgba(20,184,166,0.08), transparent 90%),
+            radial-gradient(300px 120px at 95% 100%, rgba(245,158,11,0.08), transparent 90%),
+            #ffffff;
+        box-shadow: 0 6px 18px rgba(15,23,42,0.06);
+        margin-bottom: 0.9rem;
+    }
+    .analysis-title {
+        margin: 0;
+        font-size: 1.08rem;
+        font-weight: 800;
+        color: #0f172a;
+    }
+    .analysis-sub {
+        margin: 0.25rem 0 0.8rem;
+        color: #64748b;
+        font-size: 0.88rem;
+    }
+    .score-big {
+        margin: 0.3rem 0;
+        font-size: 2rem;
+        line-height: 1;
+        font-weight: 800;
+        color: #0f766e;
+    }
+    .status-chip {
+        display: inline-block;
+        padding: 0.25rem 0.55rem;
+        border-radius: 999px;
+        font-size: 0.8rem;
+        font-weight: 700;
+        margin-bottom: 0.4rem;
+    }
+    .status-good { color: #14532d; background: #dcfce7; }
+    .status-mid { color: #92400e; background: #fef3c7; }
+    .status-bad { color: #7f1d1d; background: #fee2e2; }
+    .alert-list {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+    }
+    .alert-item {
+        border-radius: 10px;
+        padding: 0.45rem 0.6rem;
+        margin-bottom: 0.42rem;
+        font-size: 0.9rem;
+        border: 1px solid transparent;
+    }
+    .alert-item.error {
+        background: #fef2f2;
+        border-color: #fecaca;
+        color: #991b1b;
+    }
+    .alert-item.warning {
+        background: #fffbeb;
+        border-color: #fde68a;
+        color: #92400e;
+    }
+    .alert-item.success {
+        background: #f0fdf4;
+        border-color: #bbf7d0;
+        color: #166534;
+    }
+    .exp-list {
+        margin: 0;
+        padding-left: 1rem;
+        color: #0f172a;
+        font-size: 0.92rem;
+    }
+    .exp-list li { margin: 0.22rem 0; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+product_name = row.get("product_name", "Produit sans nom")
+product_code = row.get("code", "N/A")
+brand = row.get("brand", "Non spécifiée")
+quantite = row.get("quantite", "Non spécifiée")
+category_main = row.get("categorie_principale", "autres")
+categories = row.get("categories", "Non spécifiée")
+countries = row.get("countries", "Non spécifiés")
+nutrition_grade_display = str(row.get("nutrition_grade", "N/A") or "N/A").upper()
+nutri_score_display = row.get("nutriscore_score", "N/A")
+nova_display = row.get("nova_group", "N/A")
+
+main_img = row.get("image_url") or row.get("image_small_url") or row.get("image_nutrition_url")
+
+nutri_css_map = {
+    "A": "nutri-a",
+    "B": "nutri-b",
+    "C": "nutri-c",
+    "D": "nutri-d",
+    "E": "nutri-e",
+}
+nutri_class = nutri_css_map.get(nutrition_grade_display, "nutri-na")
+
+left_col, right_col = st.columns([0.50, 0.50])
+
+with left_col:
+    st.markdown("<div class='product-sheet'>", unsafe_allow_html=True)
+    image_src = ""
+    if pd.notna(main_img) and str(main_img).strip() != "":
+        image_src = str(main_img)
+    else:
+        no_image_data = get_no_image_data_uri()
+        if no_image_data:
+            image_src = no_image_data
+
+    if image_src:
+        st.markdown(
+            f"<div class='product-image-frame'><img src='{image_src}' alt='Image produit' /></div>",
+            unsafe_allow_html=True,
+        )
+
+    if pd.notna(row.get("url")) and str(row.get("url")).strip() != "":
+        st.markdown(f"[Fiche OpenFoodFacts]({row['url']})")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+with right_col:
+    st.markdown("<div class='product-sheet'>", unsafe_allow_html=True)
+    st.markdown(f"<h3 class='product-title'>{product_name}</h3>", unsafe_allow_html=True)
+    st.markdown(f"<p class='product-code'>Code produit : {product_code}</p>", unsafe_allow_html=True)
+
+    st.markdown(
+        f"<span class='nutri-badge {nutri_class}'>NutriScore {nutrition_grade_display}</span>"
+        f"<span class='nova-badge'>NOVA {nova_display}</span>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        f"<div style='margin-top:0.45rem;'>"
+        f"<span class='info-chip'>Marque: {brand}</span>"
+        f"<span class='info-chip'>Quantite: {quantite}</span>"
+        f"<span class='info-chip'>Categorie principale: {category_main}</span>"
+        f"<span class='info-chip'>NutriScore numerique: {nutri_score_display}</span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<p class='section-label'>Categories et pays</p>", unsafe_allow_html=True)
+    st.markdown(f"- Categories: {categories}")
+    st.markdown(f"- Pays: {countries}")
+
+    st.markdown("<p class='section-label'>Profil nutritionnel (pour 100g)</p>", unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class='nutrition-box'>
+            <p class='nutrition-line'><b>Glucides :</b> {row.get('carbohydrates_100g', 'N/A')} g</p>
+            <p class='nutrition-line'><b>Graisses :</b> {row.get('fat_100g', 'N/A')} g (dont saturées {row.get('saturated_fat_100g', 'N/A')} g)</p>
+            <p class='nutrition-line'><b>Sucre :</b> {row.get('sugars_100g', 'N/A')} g</p>
+            <p class='nutrition-line'><b>Fibres :</b> {row.get('fiber_100g', 'N/A')} g</p>
+            <p class='nutrition-line'><b>Protéines :</b> {row.get('proteins_100g', 'N/A')} g</p>
+            <p class='nutrition-line'><b>Sel :</b> {row.get('salt_100g', 'N/A')} g</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<p class='section-label'>Ingredients, allergenes et labels</p>", unsafe_allow_html=True)
+    st.markdown(f"- Ingrédients: {row.get('ingredients', 'Non spécifiés')}")
+    st.markdown(f"- Allergènes: {row.get('allergens', 'Non spécifiés')}")
+    st.markdown(f"- Labels: {row.get('labels', 'Non spécifiés')}")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+st.markdown("---")
 
 # ==============================
 # VARIABLES NUTRITIONNELLES
@@ -711,6 +992,24 @@ else:
     niveau_risque = "élevé"
 
 if niveau_risque == "élevé":
+    status_class = "status-bad"
+    status_text = "Risque eleve"
+    score_hint = "Produit a consommer avec moderation."
+elif niveau_risque == "modéré":
+    status_class = "status-mid"
+    status_text = "Risque modere"
+    score_hint = "Produit acceptable avec quelques limites nutritionnelles."
+else:
+    status_class = "status-good"
+    status_text = "Bon profil"
+    score_hint = "Produit globalement interessant sur le plan nutritionnel."
+
+alerts_html = ""
+for level, message in alerts:
+    alerts_html += f"<li class='alert-item {level}'>{escape(message)}</li>"
+
+if not alerts_html:
+    alerts_html = "<li class='alert-item success'>Aucune alerte nutritionnelle majeure detectee.</li>"
     st.error("Produit à risque nutritionnel élevé")
 elif niveau_risque == "modéré":
     st.warning("Produit acceptable, mais avec plusieurs limites nutritionnelles")
@@ -719,68 +1018,57 @@ else:
 
 st.markdown("### Explication")
 
+exp_html = ""
 if explications:
     for exp in explications:
-        st.markdown(f"- {exp}")
+        exp_html += f"<li>{escape(exp)}</li>"
 else:
-    st.markdown("- Aucune alerte nutritionnelle majeure détectée.")
+    exp_html = "<li>Aucune explication additionnelle.</li>"
 
-# ==============================
-# EN-TÊTE PRODUIT
-# ==============================
+st.markdown("## Analyse nutritionnelle", unsafe_allow_html=True)
+analysis_col1, analysis_col2, analysis_col3 = st.columns([0.33, 0.33, 0.34])
 
-col_title = st.columns([0.8, 0.2])[0]
+with analysis_col1:
+    st.markdown(
+        f"""
+        <div class='analysis-card'>
+            <p class='analysis-title'>Score sante</p>
+            <p class='analysis-sub'>Evaluation globale inspiree des recommandations OMS</p>
+            <p class='score-big'>{round(score, 2)} <span style='font-size:1rem; font-weight:700; color:#64748b;'>/ 100</span></p>
+            <span class='status-chip {status_class}'>{status_text}</span>
+            <p style='margin:0.35rem 0 0; color:#334155; font-size:0.9rem;'>{score_hint}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-with col_title:
-    st.subheader(f"{row['product_name']}")
-    st.caption(f"Code produit : {row['code']}")
+with analysis_col2:
+    st.markdown(
+        f"""
+        <div class='analysis-card'>
+            <p class='analysis-title'>Alertes cles</p>
+            <p class='analysis-sub'>Points sensibles detectes sur sucre, sel, graisses, NOVA et NutriScore</p>
+            <ul class='alert-list'>
+                {alerts_html}
+            </ul>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-# ==============================
-# AFFICHAGE PRINCIPAL
-# ==============================
-
-col_img, col_info = st.columns([0.6, 0.6])
-
-with col_img:
-    main_img = row.get("image_url") or row.get("image_small_url") or row.get("image_nutrition_url")
-    if pd.notna(main_img) and str(main_img).strip() != "":
-        st.image(str(main_img), width=420)
-
-    if pd.notna(row.get("url")) and str(row.get("url")).strip() != "":
-        st.markdown(f"[Fiche OpenFoodFacts]({row['url']})")
-
-with col_info:
-    categorie_principale_display = row.get("categorie_principale", "autres")
-    if pd.isna(categorie_principale_display) or str(categorie_principale_display).strip() == "":
-        categorie_principale_display = "autres"
-
-    st.markdown(f"**Marque :** {row.get('brand', 'Non spécifiée')}")
-    st.markdown(f"**Quantité :** {row.get('quantite', 'Non spécifiée')}")
-    st.markdown(f"**Catégorie principale :** {categorie_principale_display}")
-    st.markdown(f"**Catégories :** {row.get('categories', 'Non spécifiée')}")
-    st.markdown(f"**Pays :** {row.get('countries', 'Non spécifiés')}")
-    st.markdown(f"**NutriScore :** {row.get('nutrition_grade', 'N/A')} (score {row.get('nutriscore_score', 'N/A')})")
-    st.markdown(f"**Groupe NOVA :** {row.get('nova_group', 'N/A')}")
-
-    st.markdown("---")
-    st.markdown("**Détails nutritionnels (pour 100g)**")
-    st.markdown(f"- Glucides : {row.get('carbohydrates_100g', 'N/A')} g")
-    st.markdown(f"- Graisses : {row.get('fat_100g', 'N/A')} g (dont saturées {row.get('saturated_fat_100g', 'N/A')} g)")
-    st.markdown(f"- Sucre : {row.get('sugars_100g', 'N/A')} g")
-    st.markdown(f"- Fibres : {row.get('fiber_100g', 'N/A')} g")
-    st.markdown(f"- Protéines : {row.get('proteins_100g', 'N/A')} g")
-    st.markdown(f"- Sel : {row.get('salt_100g', 'N/A')} g")
-
-st.markdown("---")
-
-st.markdown("**Ingrédients**")
-st.write(row.get("ingredients", "Non spécifiés"))
-
-st.markdown("**Allergènes**")
-st.write(row.get("allergens", "Non spécifiés"))
-
-st.markdown("**Labels**")
-st.write(row.get("labels", "Non spécifiés"))
+with analysis_col3:
+    st.markdown(
+        f"""
+        <div class='analysis-card'>
+            <p class='analysis-title'>Explication</p>
+            <p class='analysis-sub'>Lecture detaillee des facteurs qui influencent le score</p>
+            <ul class='exp-list'>
+                {exp_html}
+            </ul>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 # ==============================
 # MESSAGE SI RIEN N'EST COCHÉ
@@ -805,6 +1093,10 @@ else:
             sim_img = sim.get("image_url") or sim.get("image_small_url")
             if pd.notna(sim_img) and str(sim_img).strip() != "":
                 st.image(str(sim_img), width=120)
+            else:
+                no_image_data = get_no_image_data_uri()
+                if no_image_data:
+                    st.image(no_image_data, width=120)
 
         with col2:
             st.markdown(f"### {sim.get('nom_produit', 'Produit sans nom')}")
@@ -834,6 +1126,45 @@ if show_similarity:
 # ALTERNATIVES PLUS SAINES
 # ==============================
 
+st.markdown("## 🥗 Alternatives plus saines")
+st.caption("Produits proches en composition, avec une qualité nutritionnelle meilleure ou équivalente.")
+
+if healthier_df.empty:
+    st.info("Aucune alternative plus saine trouvée.")
+else:
+    for _, sim in healthier_df.iterrows():
+        col1, col2 = st.columns([0.25, 0.75])
+
+        with col1:
+            sim_img = sim.get("image_url") or sim.get("image_small_url")
+            if pd.notna(sim_img) and str(sim_img).strip() != "":
+                st.image(str(sim_img), width=120)
+            else:
+                no_image_data = get_no_image_data_uri()
+                if no_image_data:
+                    st.image(no_image_data, width=120)
+
+        with col2:
+            st.markdown(f"### {sim.get('nom_produit', 'Produit sans nom')}")
+            st.markdown(f"**Score de similarité :** {sim.get('score_similarite', 0)}")
+            st.markdown(f"**Catégorie :** {sim.get('categorie_principale', 'Non spécifiée')}")
+            st.markdown(f"**NutriScore :** {sim.get('nutrition_grade', 'N/A')}")
+            st.markdown(f"**Groupe NOVA :** {sim.get('nova_group', 'N/A')}")
+            st.markdown(f"**Ingrédients communs :** {sim.get('ingredients_communs', 'Aucun')}")
+            st.markdown(f"**Nombre d’ingrédients communs :** {sim.get('nb_ingredients_communs', 0)}")
+
+            if st.button(
+                f"Voir détail sain {sim['code_produit_cible']}",
+                key=f"healthy_{sim['code_produit_cible']}"
+            ):
+                st.session_state["selected_code"] = sim["code_produit_cible"]
+                try:
+                    st.query_params["code"] = str(sim["code_produit_cible"])
+                except AttributeError:
+                    st.experimental_set_query_params(code=str(sim["code_produit_cible"]))
+                st.rerun()
+
+        st.markdown("---")
 if show_healthier:
     st.markdown("---")
     render_recommendation_section(

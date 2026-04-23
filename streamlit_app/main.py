@@ -27,11 +27,6 @@ if str(APP_DIR) not in sys.path:
 
 from db_connection import get_connection
 from top_menu import render_top_menu
-
-from health_logic import (
-    HealthProfile,
-    compute_personalized_scores,
-)
 from image_utils import get_no_image_data_uri
 
 
@@ -103,14 +98,6 @@ st.set_page_config(page_title="Santé & Nutrition", layout="wide", initial_sideb
 ########################################
 
 render_top_menu("Dashboard")
-
-# Variables de session liées au profil santé :
-# - `health_profile` : profil complet
-# - `use_health_profile` : booléen pour activer/désactiver son utilisation sur le dashboard
-if "health_profile" not in st.session_state:
-    st.session_state.health_profile = None
-if "use_health_profile" not in st.session_state:
-    st.session_state.use_health_profile = False
 
 ########################################
 # CONNEXION BD & ÉTAT DE SESSION
@@ -189,16 +176,32 @@ st.markdown(
     }
 
     div[class*="st-key-fav_"] button[kind="primary"] {
-        border-color: rgba(225, 29, 72, 0.55);
-        color: #ffffff;
-        background: linear-gradient(135deg, #fb7185, #e11d48);
-        box-shadow: 0 8px 18px rgba(225, 29, 72, 0.2);
+        border: 1px solid rgba(225, 29, 72, 0.22);
+        color: #e11d48;
+        background: rgba(255, 241, 242, 0.96);
+        box-shadow: 0 4px 10px rgba(225, 29, 72, 0.08);
     }
 
     div[class*="st-key-fav_"] button:hover {
         border-color: rgba(225, 29, 72, 0.5);
         box-shadow: 0 8px 18px rgba(225, 29, 72, 0.16);
     }
+
+    div[class*="st-key-compare_"] button {
+        min-width: 3rem;
+        padding: 0.35rem 0.8rem;
+        border-radius: 999px;
+        font-size: 0.95rem;
+        line-height: 1;
+    }
+
+    div[class*="st-key-compare_"] button[kind="primary"] {
+        border-color: rgba(37, 99, 235, 0.5);
+        background: linear-gradient(135deg, #60a5fa, #2563eb);
+        color: #ffffff;
+        box-shadow: 0 8px 18px rgba(37, 99, 235, 0.2);
+    }
+
     </style>
     """,
     unsafe_allow_html=True,
@@ -255,42 +258,9 @@ category_detail_filter = st.text_input(
     "Recherche libre dans catégories détaillées (optionnel)"
 )
 
-########################################
-# ACTIVATION / DÉSACTIVATION DU PROFIL SANTÉ
-########################################
-
-health_profile = st.session_state.get("health_profile")
-if health_profile is not None:
-    # Si un profil est défini, on propose un bouton pour activer / désactiver
-    # l'utilisation de ce profil dans le tri / filtrage.
-    label = (
-        "Voir des alternatives plus saines pour moi"
-        if not st.session_state.use_health_profile
-        else "Désactiver les recommandations personnalisées"
-    )
-    if st.button(label):
-        st.session_state.use_health_profile = not st.session_state.use_health_profile
-    if st.session_state.use_health_profile:
-        st.caption("Tri personnalisé activé en fonction de votre profil santé.")
-else:
-    # Message d'information si aucun profil n'a encore été configuré
-    st.caption(
-        "Définissez votre profil dans la page 'Mon profil santé' pour obtenir des recommandations personnalisées."
-    )
-
 # ==============================
 #  RESET PAGINATION SI FILTRES CHANGENT
 # ==============================
-profile_signature = None
-hp = st.session_state.get("health_profile")
-if isinstance(hp, HealthProfile):
-    # On résume le profil santé à ce qui impacte le filtrage (ici, les pénalités sucre/sel).
-    # Cela permet de détecter un changement de profil et de remettre la pagination à 1.
-    profile_signature = (
-        float(getattr(hp, "sugar_penalty", 0.0)),
-        float(getattr(hp, "salt_penalty", 0.0)),
-    )
-
 current_filters_signature = (
     search_name,
     selected_main_category,
@@ -299,8 +269,6 @@ current_filters_signature = (
     sort_option,
     sort_order,
     category_detail_filter,
-    st.session_state.get("use_health_profile", False),
-    profile_signature,
 )
 
 if "last_filters_signature" not in st.session_state:
@@ -464,48 +432,6 @@ elif sort_option == "Sucre (g/100g)":
 elif sort_option == "Sel (g/100g)":
     # Tri direct sur la colonne nettoyée du sel
     df = df.sort_values(by="salt_clean", ascending=ascending, na_position="last")
-    
-########################################
-# APPLICATION DU PROFIL SANTÉ (TRI + FILTRES SUPPLÉMENTAIRES)
-########################################
-
-health_profile = st.session_state.get("health_profile")
-use_health_profile = st.session_state.get("use_health_profile", False)
-
-if use_health_profile and health_profile is not None and not df.empty:
-    try:
-        # 1) Tri personnalisé : on calcule un score pour chaque produit en
-        #    fonction du NutriScore + sucre + sel + préférences utilisateur.
-        personalized_scores = compute_personalized_scores(df, health_profile)
-        df = (
-            df.assign(_personal_score=personalized_scores)
-            .sort_values(by="_personal_score", ascending=False)
-            .drop(columns="_personal_score")
-        )
-    except Exception as e:
-        st.warning(f"Impossible d'appliquer le tri personnalisé : {e}")
-
-if use_health_profile and health_profile is not None and not df.empty:
-    try:
-        # 2) Filtrage strict : on enlève les produits trop sucrés ou trop salés
-        #    par rapport aux pénalités choisies dans le profil.
-        sugar_penalty = float(getattr(health_profile, "sugar_penalty", 0.0))
-        salt_penalty = float(getattr(health_profile, "salt_penalty", 0.0))
-
-        if sugar_penalty > 0.0:
-            # Seuil dynamique sur le sucre : plus la pénalité est forte,
-            # plus le seuil autorisé est bas.
-            base_sugar = 50.0
-            sugar_limit = base_sugar / (1.0 + sugar_penalty)
-            df = df[(df["sugars_clean"].isna()) | (df["sugars_clean"] <= sugar_limit)]
-
-        if salt_penalty > 0.0:
-            # Seuil dynamique sur le sel : même logique que pour le sucre.
-            base_salt = 25.0
-            salt_limit = base_salt / (1.0 + salt_penalty)
-            df = df[(df["salt_clean"].isna()) | (df["salt_clean"] <= salt_limit)]
-    except Exception as e:
-        st.warning(f"Impossible d'appliquer le filtre du profil santé : {e}")
 
 ########################################
 # PAGINATION & VUE D'ACCUEIL
@@ -525,26 +451,21 @@ if is_home:
         if df.empty:
             st.session_state.home_selection = df.copy()
         else:
-            # Si le tri personnalisé est activé, on propose directement
-            # les meilleurs produits pour l'utilisateur, sans échantillon aléatoire
-            if st.session_state.get("use_health_profile", False) and st.session_state.get("health_profile") is not None:
-                selection = df.head(10)
-            else:
-                mask_img = df["image_url"].notna() & df["image_url"].astype(str).str.strip().ne("")
-                df_with_img = df[mask_img]
+            mask_img = df["image_url"].notna() & df["image_url"].astype(str).str.strip().ne("")
+            df_with_img = df[mask_img]
 
-                if len(df_with_img) >= 10:
-                    selection = df_with_img.sample(10, random_state=random.randint(0, 1_000_000))
-                else:
-                    df_without_img = df[~mask_img]
-                    needed = max(0, 10 - len(df_with_img))
-                    extras = pd.DataFrame()
-                    if needed > 0 and len(df_without_img) > 0:
-                        extras = df_without_img.sample(
-                            min(needed, len(df_without_img)),
-                            random_state=random.randint(0, 1_000_000),
-                        )
-                    selection = pd.concat([df_with_img, extras]).head(10)
+            if len(df_with_img) >= 10:
+                selection = df_with_img.sample(10, random_state=random.randint(0, 1_000_000))
+            else:
+                df_without_img = df[~mask_img]
+                needed = max(0, 10 - len(df_with_img))
+                extras = pd.DataFrame()
+                if needed > 0 and len(df_without_img) > 0:
+                    extras = df_without_img.sample(
+                        min(needed, len(df_without_img)),
+                        random_state=random.randint(0, 1_000_000),
+                    )
+                selection = pd.concat([df_with_img, extras]).head(10)
 
             st.session_state.home_selection = selection.reset_index(drop=True)
 
@@ -683,25 +604,28 @@ for index, row in df_page.iterrows():
                 except Exception:
                     st.info("Veuillez ouvrir la page 'Détail du produit' via le menu latéral.")
 
-        # Case a cocher pour selectionner le produit dans le comparateur, sur la meme ligne
+        # Bouton sticker pour selectionner le produit dans le comparateur, sur la meme ligne
         compare_selected = code_str in st.session_state.compare_selection
         with action_col2:
-            new_value = st.checkbox(
-                "Comparer",
-                value=compare_selected,
+            compare_label = "⚖️ Compare" if not compare_selected else "✅ Compare"
+            compare_help = "Ajouter a la comparaison" if not compare_selected else "Retirer de la comparaison"
+            if st.button(
+                compare_label,
                 key=f"compare_{code_str}",
-            )
-
-        if new_value and not compare_selected:
-            if len(st.session_state.compare_selection) >= 3:
-                # On n'ajoute pas le produit et on affiche seulement un message informatif
-                st.info("Vous ne pouvez comparer que 3 produits à la fois. Décochez un produit avant d'en ajouter un autre.")
-            else:
-                st.session_state.compare_selection.append(code_str)
-        elif not new_value and compare_selected:
-            st.session_state.compare_selection = [
-                c for c in st.session_state.compare_selection if c != code_str
-            ]
+                help=compare_help,
+                type="primary" if compare_selected else "secondary",
+                use_container_width=True,
+            ):
+                if compare_selected:
+                    st.session_state.compare_selection = [
+                        c for c in st.session_state.compare_selection if c != code_str
+                    ]
+                else:
+                    if len(st.session_state.compare_selection) >= 2:
+                        st.info("Vous ne pouvez comparer que 2 produits à la fois. Décochez un produit avant d'en ajouter un autre.")
+                    else:
+                        st.session_state.compare_selection.append(code_str)
+                st.rerun()
 
         # Bouton favori au format coeur, sur la meme ligne d'actions
         is_favorite = code_str in st.session_state.favorites
@@ -712,7 +636,7 @@ for index, row in df_page.iterrows():
                 fav_label,
                 key=f"fav_{code_str}",
                 help=fav_help,
-                type="primary" if is_favorite else "secondary",
+                type="secondary",
                 use_container_width=True,
             ):
                 if is_favorite:
@@ -721,6 +645,7 @@ for index, row in df_page.iterrows():
                     ]
                 else:
                     st.session_state.favorites.append(code_str)
+                st.rerun()
         st.markdown("---")
 
 # ==============================

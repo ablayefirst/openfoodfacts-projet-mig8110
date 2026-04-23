@@ -10,40 +10,42 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from db_connection import get_connection
-from health_logic import HealthProfile, compute_personalized_scores
 from image_utils import get_no_image_data_uri
 from top_menu import render_top_menu
+from ui_hero import render_page_hero
 
 
 st.set_page_config(page_title="Mon panier favori", layout="wide", initial_sidebar_state="collapsed")
 
 render_top_menu("Favoris")
 
-st.title("Mon panier favori")
-
-st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
 st.markdown(
     """
     <style>
-    div[class*="st-key-remove_fav_"] button {
-        min-width: 3rem;
-        padding: 0.35rem 0.8rem;
-        border-radius: 999px;
-        font-size: 1.3rem;
-        line-height: 1;
-        border: 1px solid rgba(225, 29, 72, 0.55);
-        color: #ffffff;
-        background: linear-gradient(135deg, #fb7185, #e11d48);
-        box-shadow: 0 8px 18px rgba(225, 29, 72, 0.2);
+    div[class*="st-key-open_card_"] button {
+        border-radius: 12px;
+        font-weight: 700;
+        color: #0f172a;
+        border-color: rgba(15, 118, 110, 0.55);
+        background:
+            linear-gradient(135deg, rgba(20, 184, 166, 0.35), rgba(245, 158, 11, 0.3)),
+            #ffffff;
+        box-shadow: 0 4px 14px rgba(15, 118, 110, 0.2);
     }
 
-    div[class*="st-key-remove_fav_"] button:hover {
-        border-color: rgba(190, 24, 93, 0.75);
-        box-shadow: 0 10px 20px rgba(225, 29, 72, 0.24);
+    div[class*="st-key-open_card_"] button:hover {
+        border-color: rgba(15, 118, 110, 0.8);
+        box-shadow: 0 6px 16px rgba(15, 118, 110, 0.26);
     }
     </style>
     """,
     unsafe_allow_html=True,
+)
+
+render_page_hero(
+    kicker="Panier personnel",
+    title="Mon panier favori",
+    subtitle="Retrouvez vos produits enregistres et accedez rapidement a leur fiche detail.",
 )
 
 if "favorites" not in st.session_state or not st.session_state.favorites:
@@ -85,27 +87,14 @@ if fav_df.empty:
     st.error("Impossible de charger les produits favoris.")
     st.stop()
 
-# Calcul éventuel du score personnalisé
-health_profile = st.session_state.get("health_profile")
-use_health_profile = st.session_state.get("use_health_profile", False)
 
-if use_health_profile and isinstance(health_profile, HealthProfile):
-    try:
-        scores = compute_personalized_scores(fav_df, health_profile)
-        fav_df = fav_df.assign(personal_score=scores)
-    except Exception as e:
-        st.warning(f"Impossible de calculer le score personnalisé : {e}")
-        fav_df["personal_score"] = pd.NA
-else:
-    fav_df["personal_score"] = pd.NA
-
-st.subheader("Produits de votre panier")
-
+st.markdown("---")
 # Affichage en cartes avec photo (2 cartes par ligne)
 cols = st.columns(2)
 
 for index, (_, row) in enumerate(fav_df.iterrows()):
     col = cols[index % 2]
+    code_str = str(row["code"])
 
     image_html = ""
     image_url = row.get("image_url")
@@ -121,6 +110,7 @@ for index, (_, row) in enumerate(fav_df.iterrows()):
         nutriscore_display = "N/A"
 
     with col:
+
         st.markdown(
             f"""
             <div style="
@@ -153,42 +143,20 @@ for index, (_, row) in enumerate(fav_df.iterrows()):
             unsafe_allow_html=True,
         )
 
-        if pd.notna(row.get("personal_score")):
-            st.markdown(f"Score santé personnalisé : {row['personal_score']:.2f}")
-
         if st.button(
-            "❤️",
-            key=f"remove_fav_{row['code']}",
-            help="Retirer des favoris",
-            type="primary",
+            "Détail",
+            key=f"open_card_{code_str}",
+            help="Voir le détail du produit",
+            use_container_width=True,
         ):
-            st.session_state.favorites = [c for c in st.session_state.favorites if str(c) != str(row["code"])]
-            st.rerun()
+            st.session_state.selected_code = code_str
+            try:
+                st.query_params["code"] = code_str
+            except AttributeError:
+                st.experimental_set_query_params(code=code_str)
 
-st.markdown("---")
-
-if fav_df["personal_score"].notna().any():
-    best_idx = fav_df["personal_score"].idxmax()
-    best_row = fav_df.loc[best_idx]
-    st.subheader("Meilleur choix pour vous dans ce panier")
-    st.markdown(
-        f"**{best_row['product_name']}** (code {best_row['code']}) - Score santé personnalisé : {best_row['personal_score']:.2f}"
-    )
-elif fav_df["nutriscore_grade"].notna().any():
-    mapping = {"A": 5.0, "B": 4.0, "C": 3.0, "D": 2.0, "E": 1.0}
-    nutri_numeric = (
-        fav_df["nutriscore_grade"]
-        .fillna("")
-        .astype(str)
-        .str.upper()
-        .map(mapping)
-        .fillna(0.0)
-    )
-    if nutri_numeric.max() > 0:
-        best_idx = nutri_numeric.idxmax()
-        best_row = fav_df.loc[best_idx]
-        st.subheader("Meilleur choix selon le NutriScore")
-        st.markdown(
-            f"**{best_row['product_name']}** (code {best_row['code']}) - NutriScore : {best_row['nutriscore_grade']}"
-        )
+            try:
+                st.switch_page("pages/01_detail_produit.py")
+            except Exception:
+                st.info("Veuillez ouvrir la page 'Détail du produit' via le menu latéral.")
 
