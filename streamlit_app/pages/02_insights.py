@@ -1,12 +1,21 @@
 import json
+import sys
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
-from db_connection import get_connection
+APP_DIR = Path(__file__).resolve().parents[1]
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
 
-st.set_page_config(page_title="Tendances", layout="wide")
+from db_connection import get_connection
+from top_menu import render_top_menu
+
+st.set_page_config(page_title="Tendances", layout="wide", initial_sidebar_state="collapsed")
+
+render_top_menu("Tendances")
 
 METRIC_OPTIONS = {
     "Sucre (g/100g)": {
@@ -82,22 +91,9 @@ METRIC_OPTIONS = {
     },
 }
 
-st.markdown(
-    """
-    <style>
-    [data-testid="stSidebarNav"] {display: none;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-if st.button("Retour au Dashboard"):
-    st.switch_page("main.py")
-
 st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
 
-st.title("Tendances des données – OpenFoodFacts Canada")
+st.title("Tendances des données – OpenFoodFacts United States")
 
 st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
 

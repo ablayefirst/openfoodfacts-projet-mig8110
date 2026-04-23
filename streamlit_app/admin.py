@@ -1,5 +1,6 @@
 import os
 import math
+from datetime import datetime, UTC
 import streamlit as st
 
 from sqlalchemy import or_, cast, String
@@ -12,6 +13,8 @@ from models import (
     Marque,
     Categorie,
     Ingredient,
+    RejectedProductReview,
+    ManualProductCorrection,
     produit_categorie,
     produit_ingredient,
 )
@@ -25,6 +28,10 @@ def _split_csv(txt: str) -> list[str]:
         return []
     parts = [p.strip() for p in txt.replace("|", ",").split(",")]
     return [p for p in parts if p]
+
+
+def _utcnow():
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _get_or_create_marque(db, marque_nom: str | None) -> Marque | None:
@@ -146,6 +153,52 @@ def _get_selected_categories_for_product(db, code_produit: str) -> list[str]:
     return [row[0] for row in rows]
 
 
+def _get_active_correction_for_code(db, code_produit: str) -> ManualProductCorrection | None:
+    return (
+        db.execute(
+            select(ManualProductCorrection)
+            .where(
+                ManualProductCorrection.code_produit == code_produit,
+                ManualProductCorrection.is_active.is_(True),
+            )
+            .order_by(ManualProductCorrection.updated_at.desc(), ManualProductCorrection.correction_id.desc())
+        )
+        .scalars()
+        .first()
+    )
+
+
+def _format_issue_list(issues) -> str:
+    if isinstance(issues, list):
+        return ", ".join(str(issue) for issue in issues if issue)
+    if isinstance(issues, str):
+        return issues
+    return ""
+
+
+def _payload_field_value(payload: dict, *keys: str) -> str:
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        if isinstance(value, list):
+            formatted = ", ".join(str(item) for item in value if item not in {None, ""})
+            if formatted:
+                return formatted
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _manual_or_source_value(manual_value, source_value: str) -> str:
+    if manual_value is None:
+        return source_value
+    text = str(manual_value).strip()
+    return text if text else source_value
+
+
 # =========================
 # Auth Streamlit (session_state)
 # =========================
@@ -170,13 +223,35 @@ def _login_ui():
 
 
 def _logout_ui():
-    if st.sidebar.button("Logout"):
+    if st.button("Logout", type="secondary"):
         st.session_state.pop("admin_ok", None)
         st.session_state.pop("admin_mode", None)
         st.session_state.pop("admin_code", None)
+        st.session_state.pop("admin_rejected_id", None)
         st.session_state.pop("admin_q", None)
         st.session_state.pop("admin_page", None)
+        st.session_state.pop("reject_q", None)
+        st.session_state.pop("reject_status", None)
+        st.session_state.pop("admin_flash", None)
         st.rerun()
+
+
+def _show_admin_flash():
+    flash = st.session_state.pop("admin_flash", None)
+    if not flash:
+        return
+
+    level = flash.get("level", "success")
+    message = flash.get("message", "")
+    if not message:
+        return
+
+    if level == "error":
+        st.error(message)
+    elif level == "warning":
+        st.warning(message)
+    else:
+        st.success(message)
 
 
 # =========================
@@ -184,6 +259,13 @@ def _logout_ui():
 # =========================
 def _products_list_ui():
     st.subheader("📦 Admin - Produits")
+    nav1, nav2 = st.columns([1, 1])
+    with nav1:
+        st.button("📦 Produits", disabled=True, use_container_width=True)
+    with nav2:
+        if st.button("🛠️ Rejets à corriger", use_container_width=True):
+            st.session_state["admin_mode"] = "reject_list"
+            st.rerun()
 
     c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
@@ -270,6 +352,363 @@ def _products_list_ui():
                     st.session_state["admin_code"] = str(p.code_produit)
                     st.rerun()
 
+    finally:
+        db.close()
+
+
+# =========================
+# Admin - Liste des rejets
+# =========================
+def _rejected_products_list_ui():
+    st.subheader("🛠️ Produits rejetés à corriger")
+    _show_admin_flash()
+    nav1, nav2 = st.columns([1, 1])
+    with nav1:
+        if st.button("📦 Produits", use_container_width=True):
+            st.session_state["admin_mode"] = "list"
+            st.rerun()
+    with nav2:
+        st.button("🛠️ Rejets à corriger", disabled=True, use_container_width=True)
+
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        q = st.text_input(
+            "Recherche code / nom / marque",
+            value=st.session_state.get("reject_q", ""),
+        )
+    with c2:
+        status_filter = st.selectbox(
+            "Statut",
+            ["all", "pending", "in_review", "corrected", "resolved", "ignored"],
+            index=["all", "pending", "in_review", "corrected", "resolved", "ignored"].index(
+                st.session_state.get("reject_status", "all")
+            ),
+        )
+
+    st.session_state["reject_q"] = q
+    st.session_state["reject_status"] = status_filter
+
+    db = SessionLocal()
+    try:
+        query_db = db.query(RejectedProductReview)
+
+        qn = (q or "").strip()
+        if qn:
+            like = f"%{qn}%"
+            query_db = query_db.filter(
+                or_(
+                    RejectedProductReview.code_produit.ilike(like),
+                    RejectedProductReview.product_name.ilike(like),
+                    RejectedProductReview.brands.ilike(like),
+                )
+            )
+
+        if status_filter != "all":
+            query_db = query_db.filter(RejectedProductReview.review_status == status_filter)
+
+        rejected_products = (
+            query_db.order_by(RejectedProductReview.created_at.desc(), RejectedProductReview.rejected_id.desc())
+            .limit(200)
+            .all()
+        )
+
+        st.caption(f"Résultats: **{len(rejected_products)}**")
+        st.divider()
+
+        if not rejected_products:
+            st.info("Aucun produit rejeté à afficher.")
+            return
+
+        for rejected in rejected_products:
+            correction = _get_active_correction_for_code(db, rejected.code_produit)
+            col1, col2 = st.columns([4, 1])
+
+            with col1:
+                st.write(f"**{rejected.code_produit}** — {rejected.product_name or 'Sans nom'}")
+                st.caption(
+                    f"Marque: {rejected.brands or 'N/A'} | "
+                    f"Issues: {_format_issue_list(rejected.quality_issues) or 'N/A'} | "
+                    f"Rejet: {rejected.review_status}"
+                )
+                if correction:
+                    st.caption(
+                        f"Correction active: {correction.correction_status} | "
+                        f"Par: {correction.corrected_by or 'N/A'}"
+                    )
+
+            with col2:
+                if st.button("✏️ Corriger", key=f"reject_edit_{rejected.rejected_id}"):
+                    st.session_state["admin_mode"] = "reject_edit"
+                    st.session_state["admin_rejected_id"] = int(rejected.rejected_id)
+                    st.rerun()
+
+    except SQLAlchemyError as e:
+        st.error(f"Erreur chargement rejets: {e}")
+        st.info("Vérifie que les nouvelles tables SQL ont bien été créées dans PostgreSQL.")
+    finally:
+        db.close()
+
+
+# =========================
+# Admin - Form correction rejet
+# =========================
+def _rejected_product_form_ui(rejected_id: int | None):
+    if rejected_id is None:
+        st.error("Produit rejeté introuvable.")
+        if st.button("⬅️ Retour à la liste des rejets"):
+            st.session_state["admin_mode"] = "reject_list"
+            st.session_state.pop("admin_rejected_id", None)
+            st.rerun()
+        return
+
+    db = SessionLocal()
+    try:
+        rejected = (
+            db.execute(
+                select(RejectedProductReview).where(RejectedProductReview.rejected_id == int(rejected_id))
+            )
+            .scalars()
+            .first()
+        )
+
+        if not rejected:
+            st.error("Produit rejeté introuvable.")
+            if st.button("⬅️ Retour à la liste des rejets"):
+                st.session_state["admin_mode"] = "reject_list"
+                st.session_state.pop("admin_rejected_id", None)
+                st.rerun()
+            return
+
+        correction = _get_active_correction_for_code(db, rejected.code_produit)
+        payload = rejected.raw_payload if isinstance(rejected.raw_payload, dict) else {}
+        issues = rejected.quality_issues if isinstance(rejected.quality_issues, list) else []
+
+        st.subheader(f"✏️ Correction manuelle — {rejected.code_produit}")
+        st.caption(
+            f"Nom: {rejected.product_name or 'N/A'} | "
+            f"Marque: {rejected.brands or 'N/A'} | "
+            f"Statut: {rejected.review_status}"
+        )
+        st.warning(f"Causes de rejet: {_format_issue_list(issues) or 'N/A'}")
+
+        with st.expander("Voir les données brutes du produit"):
+            st.json(payload)
+
+        source_product_name = _payload_field_value(payload, "product_name", "product_name_en", "product_name_fr")
+        source_brands = _payload_field_value(payload, "brands", "brands_en", "brands_fr")
+        source_categories = _payload_field_value(payload, "categories", "categories_old", "categories_en", "categories_fr")
+        source_categories_tags = _payload_field_value(payload, "categories_tags")
+        source_primary_category = _payload_field_value(payload, "categorie_principale", "pnns_groups_2", "pnns_groups_1")
+        source_ingredients = _payload_field_value(
+            payload,
+            "ingredients_text",
+            "ingredients_text_en",
+            "ingredients_text_fr",
+            "ingredients_text_with_allergens",
+        )
+
+        with st.form("rejected_product_correction_form", clear_on_submit=False):
+            corrected_by = st.text_input(
+                "Corrigé par",
+                value=(correction.corrected_by if correction and correction.corrected_by else ""),
+            )
+            st.markdown("**Colonnes produit corrigibles**")
+
+            src_col, edit_col = st.columns(2)
+            with src_col:
+                st.text_input(
+                    "Nom produit actuel",
+                    value=source_product_name or rejected.product_name or "",
+                    disabled=True,
+                )
+            with edit_col:
+                product_name_manual = st.text_input(
+                    "Nom produit corrigé",
+                    value=_manual_or_source_value(
+                        correction.product_name_manual if correction else None,
+                        source_product_name or rejected.product_name or "",
+                    ),
+                )
+
+            src_col, edit_col = st.columns(2)
+            with src_col:
+                st.text_input(
+                    "Marque actuelle",
+                    value=source_brands or rejected.brands or "",
+                    disabled=True,
+                )
+            with edit_col:
+                brands_manual = st.text_input(
+                    "Marque corrigée",
+                    value=_manual_or_source_value(
+                        correction.brands_manual if correction else None,
+                        source_brands or rejected.brands or "",
+                    ),
+                )
+
+            src_col, edit_col = st.columns(2)
+            with src_col:
+                st.text_area(
+                    "Catégories actuelles",
+                    value=source_categories,
+                    height=70,
+                    disabled=True,
+                )
+            with edit_col:
+                categories_manual = st.text_area(
+                    "Catégories corrigées",
+                    value=_manual_or_source_value(
+                        correction.categories_manual if correction else None,
+                        source_categories,
+                    ),
+                    height=70,
+                    placeholder="teas, herbal teas",
+                )
+
+            src_col, edit_col = st.columns(2)
+            with src_col:
+                st.text_area(
+                    "Tags catégories actuels",
+                    value=source_categories_tags,
+                    height=70,
+                    disabled=True,
+                )
+            with edit_col:
+                categories_tags_manual = st.text_area(
+                    "Tags catégories corrigés",
+                    value=_manual_or_source_value(
+                        ", ".join(correction.categories_tags_manual)
+                        if correction and correction.categories_tags_manual
+                        else None,
+                        source_categories_tags,
+                    ),
+                    placeholder="en:teas, en:herbal-teas",
+                    height=70,
+                )
+
+            src_col, edit_col = st.columns(2)
+            with src_col:
+                st.text_input(
+                    "Catégorie principale actuelle",
+                    value=source_primary_category,
+                    disabled=True,
+                )
+            with edit_col:
+                categorie_principale_manual = st.text_input(
+                    "Catégorie principale corrigée",
+                    value=_manual_or_source_value(
+                        correction.categorie_principale_manual if correction else None,
+                        source_primary_category,
+                    ),
+                    placeholder="boisson",
+                )
+
+            src_col, edit_col = st.columns(2)
+            with src_col:
+                st.text_area(
+                    "Ingrédients actuels",
+                    value=source_ingredients,
+                    height=120,
+                    disabled=True,
+                )
+            with edit_col:
+                ingredients_text_manual = st.text_area(
+                    "Ingrédients corrigés",
+                    value=_manual_or_source_value(
+                        correction.ingredients_text_manual if correction else None,
+                        source_ingredients,
+                    ),
+                    height=120,
+                )
+            commentaire = st.text_area(
+                "Commentaire admin",
+                value=(correction.commentaire if correction and correction.commentaire else ""),
+                height=80,
+            )
+            correction_status = st.selectbox(
+                "Statut de la correction",
+                ["draft", "ready_for_pipeline", "archived"],
+                index=["draft", "ready_for_pipeline", "archived"].index(
+                    correction.correction_status
+                    if correction and correction.correction_status in {"draft", "ready_for_pipeline", "archived"}
+                    else "draft"
+                ),
+            )
+
+            save = st.form_submit_button("Enregistrer la correction")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            ignore_clicked = st.button("Ignorer ce rejet", type="secondary")
+        with c2:
+            back_clicked = st.button("⬅️ Retour à la liste des rejets")
+
+        if save:
+            try:
+                now = _utcnow()
+                tags_manual = _split_csv(categories_tags_manual)
+
+                if correction is None:
+                    correction = ManualProductCorrection(
+                        rejected_id=rejected.rejected_id,
+                        code_produit=rejected.code_produit,
+                        created_at=now,
+                    )
+                    db.add(correction)
+
+                correction.rejected_id = rejected.rejected_id
+                correction.code_produit = rejected.code_produit
+                correction.product_name_manual = product_name_manual.strip() or None
+                correction.brands_manual = brands_manual.strip() or None
+                correction.categories_manual = categories_manual.strip() or None
+                correction.categories_tags_manual = tags_manual or None
+                correction.categorie_principale_manual = categorie_principale_manual.strip() or None
+                correction.ingredients_text_manual = ingredients_text_manual.strip() or None
+                correction.commentaire = commentaire.strip() or None
+                correction.corrected_by = corrected_by.strip() or None
+                correction.correction_status = correction_status
+                correction.is_active = correction_status != "archived"
+                correction.updated_at = now
+
+                rejected.review_status = "corrected" if correction_status == "ready_for_pipeline" else "in_review"
+                rejected.updated_at = now
+
+                db.commit()
+                st.session_state["admin_flash"] = {
+                    "level": "success",
+                    "message": f"Correction enregistrée pour le produit {rejected.code_produit}.",
+                }
+                st.session_state["admin_mode"] = "reject_list"
+                st.session_state.pop("admin_rejected_id", None)
+                st.rerun()
+            except SQLAlchemyError as e:
+                db.rollback()
+                st.error(f"Erreur enregistrement correction: {e}")
+            except Exception as e:
+                db.rollback()
+                st.error(f"Erreur inattendue enregistrement correction: {e}")
+
+        if ignore_clicked:
+            try:
+                rejected.review_status = "ignored"
+                rejected.updated_at = _utcnow()
+                db.commit()
+                st.success("Produit marqué comme ignoré.")
+                st.session_state["admin_mode"] = "reject_list"
+                st.session_state.pop("admin_rejected_id", None)
+                st.rerun()
+            except SQLAlchemyError as e:
+                db.rollback()
+                st.error(f"Erreur mise à jour statut: {e}")
+
+        if back_clicked:
+            st.session_state["admin_mode"] = "reject_list"
+            st.session_state.pop("admin_rejected_id", None)
+            st.rerun()
+
+    except SQLAlchemyError as e:
+        st.error(f"Erreur chargement correction: {e}")
+        st.info("Vérifie que les nouvelles tables SQL ont bien été créées dans PostgreSQL.")
     finally:
         db.close()
 
@@ -512,7 +951,7 @@ def run_admin():
         _login_ui()
         return
 
-    st.sidebar.success("Connecté en admin ✅")
+    st.success("Connecte en admin")
     _logout_ui()
 
     mode = st.session_state.get("admin_mode", "list")
@@ -528,6 +967,12 @@ def run_admin():
 
     elif mode == "delete":
         _delete_ui(code=st.session_state.get("admin_code"))
+
+    elif mode == "reject_list":
+        _rejected_products_list_ui()
+
+    elif mode == "reject_edit":
+        _rejected_product_form_ui(rejected_id=st.session_state.get("admin_rejected_id"))
 
     else:
         st.session_state["admin_mode"] = "list"

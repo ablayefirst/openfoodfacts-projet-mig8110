@@ -52,9 +52,10 @@ def not_empty(obj: dict[str, Any], key: str) -> bool:
 
 def has_country(product: dict[str, Any], country: str) -> bool:
     country = country.lower()
+    country_slug = country.replace(" ", "-")
     countries = str(product.get("countries") or "").lower()
     tags = [str(tag).lower() for tag in (product.get("countries_tags") or [])]
-    return country in countries or f"en:{country}" in tags
+    return country in countries or f"en:{country_slug}" in tags
 
 
 def value_present(value: Any) -> bool:
@@ -639,6 +640,75 @@ def process_local_export_file(
     return False
 
 
+def stream_filter_url(
+    session: requests.Session,
+    source_url: str,
+    output_handle,
+    country: str,
+    min_core_nutrients: int,
+    stats: dict[str, int],
+    max_rows: int | None = None,
+) -> bool:
+    """Stream, decompress and filter a remote .jsonl or .jsonl.gz URL without writing it to disk."""
+    is_gzip = source_url.endswith(".gz")
+    for attempt in range(1, DOWNLOAD_MAX_ATTEMPTS + 1):
+        try:
+            with session.get(source_url, stream=True, timeout=(30, 3600)) as response:
+                response.raise_for_status()
+                response.raw.decode_content = False
+                raw_stream = gzip.GzipFile(fileobj=response.raw) if is_gzip else response.raw
+                text_stream = io.TextIOWrapper(raw_stream, encoding="utf-8", errors="replace")
+                for line in text_stream:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    stats["lines_read"] += 1
+                    if stats["lines_read"] % 500_000 == 0:
+                        print(
+                            f"Progress: lines_read={stats['lines_read']:,}, "
+                            f"rows_kept={stats['rows_kept']}, "
+                            f"dropped_country={stats['dropped_country']:,}"
+                        )
+                    try:
+                        product = json.loads(line)
+                    except json.JSONDecodeError:
+                        stats["invalid_json_lines"] += 1
+                        continue
+                    if not isinstance(product, dict):
+                        stats["invalid_json_lines"] += 1
+                        continue
+                    if not has_country(product, country):
+                        stats["dropped_country"] += 1
+                        continue
+                    if not not_empty(product, "code"):
+                        stats["dropped_code"] += 1
+                        continue
+                    if not (not_empty(product, "product_name") or not_empty(product, "product_name_fr")):
+                        stats["dropped_name"] += 1
+                        continue
+                    if not has_category(product):
+                        stats["dropped_category"] += 1
+                        continue
+                    if min_core_nutrients > 0 and count_core_nutrients(product) < min_core_nutrients:
+                        stats["dropped_nutrition"] += 1
+                        continue
+                    output_handle.write(json.dumps(product, ensure_ascii=False) + "\n")
+                    stats["rows_kept"] += 1
+                    if max_rows is not None and stats["rows_kept"] >= max_rows:
+                        return True
+            return False
+        except Exception as exc:
+            if attempt >= DOWNLOAD_MAX_ATTEMPTS:
+                raise
+            wait_seconds = min(30, attempt * 5)
+            print(
+                f"Stream attempt {attempt}/{DOWNLOAD_MAX_ATTEMPTS} failed for {source_url}: {exc}. "
+                f"Retrying in {wait_seconds}s..."
+            )
+            time.sleep(wait_seconds)
+    return False
+
+
 def filter_product(product: dict[str, Any], country: str, min_core_nutrients: int) -> str | None:
     if not has_country(product, country):
         return None
@@ -678,11 +748,10 @@ def stream_export_to_jsonl(
     }
 
     with output_path.open("w", encoding="utf-8") as handle:
-        for index, source_url in enumerate(source_urls, start=1):
-            download_path = build_download_cache_path(output_path, source_url, index=index)
-            local_source = download_source_file(session, source_url, download_path)
-            limit_reached = process_local_export_file(
-                source_path=local_source,
+        for source_url in source_urls:
+            limit_reached = stream_filter_url(
+                session=session,
+                source_url=source_url,
                 output_handle=handle,
                 country=country,
                 min_core_nutrients=min_core_nutrients,
@@ -724,12 +793,12 @@ def process_full_export(
     }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    download_path = build_download_cache_path(output_path, source_url, index=1)
-    local_source = download_source_file(session, source_url, download_path)
     stats["files_downloaded"] = 1
 
-    source_for_filtering = local_source
     if full_mode == "sample":
+        # Sample mode requires a local copy to do reservoir/first-n sampling
+        download_path = build_download_cache_path(output_path, source_url, index=1)
+        local_source = download_source_file(session, source_url, download_path)
         sample_path = build_full_sample_path(
             output_path=output_path,
             sample_size=full_sample_size,
@@ -743,17 +812,27 @@ def process_full_export(
             sample_seed=full_sample_seed,
         )
         stats.update(sample_stats)
-        source_for_filtering = sample_path
-
-    with output_path.open("w", encoding="utf-8") as handle:
-        process_local_export_file(
-            source_path=source_for_filtering,
-            output_handle=handle,
-            country=country,
-            min_core_nutrients=min_core_nutrients,
-            stats=stats,
-            max_rows=max_rows,
-        )
+        with output_path.open("w", encoding="utf-8") as handle:
+            process_local_export_file(
+                source_path=sample_path,
+                output_handle=handle,
+                country=country,
+                min_core_nutrients=min_core_nutrients,
+                stats=stats,
+                max_rows=max_rows,
+            )
+    else:
+        # Direct mode: stream from network, decompress and filter without writing the full dump to disk
+        with output_path.open("w", encoding="utf-8") as handle:
+            stream_filter_url(
+                session=session,
+                source_url=source_url,
+                output_handle=handle,
+                country=country,
+                min_core_nutrients=min_core_nutrients,
+                stats=stats,
+                max_rows=max_rows,
+            )
 
     return stats
 
@@ -787,9 +866,10 @@ def ensure_utc(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
-def build_batch_paths(output_dir: str, import_type: str, suffix: str) -> tuple[Path, str, str]:
+def build_batch_paths(output_dir: str, import_type: str, suffix: str, country: str = "united states") -> tuple[Path, str, str]:
     local_dir = Path(output_dir) / "bronze" / "openfood" / import_type
-    local_filename = f"openfood_canada_{import_type}_{suffix}.jsonl"
+    country_slug = country.lower().replace(" ", "_")
+    local_filename = f"openfood_{country_slug}_{import_type}_{suffix}.jsonl"
     bronze_key = f"openfood/{import_type}/{local_filename}"
     silver_key = bronze_key.replace(".jsonl", ".parquet")
     return local_dir / local_filename, bronze_key, silver_key
@@ -836,7 +916,7 @@ def extract_official_exports(
     local_file: str | None = None,
     mode: str = "auto",
     output_dir: str = "/opt/airflow/data",
-    country: str = "canada",
+    country: str = "united states",
     min_core_nutrients: int | None = None,
     full_refresh_interval_days: int | None = None,
     delta_retention_days: int | None = None,
@@ -922,7 +1002,7 @@ def extract_official_exports(
 
     if run_full:
         suffix = now_utc.strftime("%Y%m%d")
-        output_path, bronze_key, silver_key = build_batch_paths(output_dir, "full", suffix)
+        output_path, bronze_key, silver_key = build_batch_paths(output_dir, "full", suffix, country)
         stats = process_full_export(
             session=session,
             source_url=full_jsonl_url,
@@ -961,7 +1041,7 @@ def extract_official_exports(
         start_ts = pending_entries[0]["start_ts"]
         end_ts = pending_entries[-1]["end_ts"]
         suffix = f"{start_ts}_{end_ts}"
-        output_path, bronze_key, silver_key = build_batch_paths(output_dir, "delta", suffix)
+        output_path, bronze_key, silver_key = build_batch_paths(output_dir, "delta", suffix, country)
         stats = stream_export_to_jsonl(
             session=session,
             source_urls=[entry["url"] for entry in pending_entries],

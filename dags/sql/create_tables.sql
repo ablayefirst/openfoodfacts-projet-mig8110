@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS produit_categorie (
 );
 
 
-CREATE TABLE synonyme_ingredient (
+CREATE TABLE IF NOT EXISTS synonyme_ingredient (
     id_synonyme SERIAL PRIMARY KEY,
     nom_synonyme TEXT,
     id_ingredient INT REFERENCES ingredient(id_ingredient)
@@ -131,6 +131,62 @@ CREATE TABLE IF NOT EXISTS etl_import_history (
 );
 
 -- =====================================================
+-- REVUE DES PRODUITS REJETES ET CORRECTIONS MANUELLES
+-- =====================================================
+
+CREATE TABLE IF NOT EXISTS rejected_products_review (
+    rejected_id SERIAL PRIMARY KEY,
+    code_produit TEXT NOT NULL,
+    product_name TEXT,
+    brands TEXT,
+    raw_payload JSONB NOT NULL,
+    quality_issues JSONB NOT NULL,
+    source_run_id TEXT,
+    source_task TEXT,
+    import_type TEXT,
+    review_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (review_status IN ('pending', 'in_review', 'corrected', 'resolved', 'ignored')),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS manual_product_corrections (
+    correction_id SERIAL PRIMARY KEY,
+    rejected_id INTEGER REFERENCES rejected_products_review(rejected_id) ON DELETE SET NULL,
+    code_produit TEXT NOT NULL,
+    product_name_manual TEXT,
+    brands_manual TEXT,
+    categories_manual TEXT,
+    categories_tags_manual JSONB,
+    categorie_principale_manual TEXT,
+    ingredients_text_manual TEXT,
+    commentaire TEXT,
+    corrected_by TEXT,
+    correction_status TEXT NOT NULL DEFAULT 'draft'
+        CHECK (correction_status IN ('draft', 'ready_for_pipeline', 'applied', 'rejected', 'archived')),
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =====================================================
+-- RECOMMANDATIONS PRODUITS
+-- =====================================================
+
+CREATE TABLE IF NOT EXISTS produit_similaire (
+    code_produit_source TEXT REFERENCES produit(code_produit) ON DELETE CASCADE,
+    code_produit_cible TEXT REFERENCES produit(code_produit) ON DELETE CASCADE,
+    type_recommandation TEXT NOT NULL,
+    score_similarite NUMERIC,
+    nb_ingredients_communs INTEGER,
+    ingredients_communs TEXT,
+    methode TEXT,
+    health_score_source NUMERIC,
+    health_score_cible NUMERIC,
+    PRIMARY KEY (code_produit_source, code_produit_cible, type_recommandation)
+);
+
+-- =====================================================
 -- INDEX POUR PERFORMANCE (APP WEB + ETL)
 -- =====================================================
 
@@ -165,3 +221,16 @@ WHERE sugars_100g IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_etl_import_history_imported_at ON etl_import_history(imported_at);
 CREATE INDEX IF NOT EXISTS idx_etl_import_history_type_end_ts ON etl_import_history(import_type, source_end_ts);
+CREATE INDEX IF NOT EXISTS idx_rejected_products_review_code
+ON rejected_products_review(code_produit);
+CREATE INDEX IF NOT EXISTS idx_rejected_products_review_status
+ON rejected_products_review(review_status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_manual_product_corrections_code
+ON manual_product_corrections(code_produit);
+CREATE INDEX IF NOT EXISTS idx_manual_product_corrections_status
+ON manual_product_corrections(correction_status, is_active);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_manual_product_corrections_active_code
+ON manual_product_corrections(code_produit)
+WHERE is_active = TRUE;
+CREATE INDEX IF NOT EXISTS idx_produit_similaire_source_type
+ON produit_similaire(code_produit_source, type_recommandation);

@@ -1,5 +1,5 @@
 """
-DAG Airflow pour le pipeline Open Food Facts Canada
+DAG Airflow pour le pipeline Open Food Facts United States
 Extraction → Upload MinIO → Transformation → Chargement
 """
 
@@ -21,6 +21,7 @@ if DAGS_PATH not in sys.path:
 
 from scripts.extract_off_exports import extract_official_exports
 from scripts.first_clean_from_bronze import first_clean_from_bronze
+from scripts.build_similarity import build_similarity_recommendations
 from scripts.load_to_postgres import load_silver_to_postgres
 from scripts.merge_final_clean import merge_final_clean
 from scripts.second_clean_from_bad import second_clean_from_bad
@@ -37,13 +38,13 @@ default_args = {
 }
 
 with DAG(
-    dag_id="openfood_pipeline_canada",
+    dag_id="openfood_pipeline_united_states",
     default_args=default_args,
-    description="Pipeline ETL Open Food Facts Canada via official full dump and delta exports",
+    description="Pipeline ETL Open Food Facts United States via official full dump and delta exports",
     start_date=datetime(2024, 1, 1),
     schedule=timedelta(days=14),
     catchup=False,
-    tags=["openfood", "canada", "etl"],
+    tags=["openfood", "united_states", "etl"],
 ) as dag:
 
     # Chemin DATA commun (à adapter selon ton docker-compose volume)
@@ -55,7 +56,7 @@ with DAG(
         op_kwargs={
             "mode": os.getenv("OPENFOOD_IMPORT_MODE", "auto"),
             "output_dir": DATA_DIR,
-            "country": os.getenv("OPENFOOD_COUNTRY", "canada"),
+            "country": os.getenv("OPENFOOD_COUNTRY", "united states"),
             "min_core_nutrients": int(os.getenv("OPENFOOD_MIN_CORE_NUTRIENTS", "2")),
             "full_refresh_interval_days": int(os.getenv("OPENFOOD_FULL_REFRESH_INTERVAL_DAYS", "56")),
             "delta_retention_days": int(os.getenv("OPENFOOD_DELTA_RETENTION_DAYS", "14")),
@@ -121,4 +122,9 @@ with DAG(
         },
     )
 
-    extract_task >> upload_task >> first_clean_task >> second_clean_task >> merge_task >> load_task
+    build_similarity_task = PythonOperator(
+        task_id="build_similarity_recommendations",
+        python_callable=build_similarity_recommendations,
+    )
+
+    extract_task >> upload_task >> first_clean_task >> second_clean_task >> merge_task >> load_task >> build_similarity_task

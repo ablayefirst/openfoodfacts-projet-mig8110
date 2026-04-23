@@ -13,13 +13,20 @@ Ce module gère :
 import os
 import math
 import random
+import sys
 import warnings
+from pathlib import Path
 
 import streamlit as st
 import pandas as pd
 
+# Ensure local Streamlit modules are importable regardless of launch directory.
+APP_DIR = Path(__file__).resolve().parent
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
+
 from db_connection import get_connection
-from admin import run_admin
+from top_menu import render_top_menu
 
 from health_logic import (
     HealthProfile,
@@ -89,29 +96,13 @@ def shorten_text(text: str, max_length: int = 30) -> str:
 ########################################
 
 # Configuration de base de la page Streamlit (titre de l'onglet, largeur, etc.)
-st.set_page_config(page_title="Santé & Nutrition", layout="wide")
-
-# On masque le menu de navigation automatique de Streamlit
-# car on gère nous-mêmes la navigation via un selectbox personnalisé.
-st.markdown(
-    """
-    <style>
-    [data-testid="stSidebarNav"] {display: none;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.set_page_config(page_title="Santé & Nutrition", layout="wide", initial_sidebar_state="collapsed")
 
 ########################################
-# NAVIGATION PRINCIPALE (SIDEBAR)
+# NAVIGATION PRINCIPALE (MENU HORIZONTAL)
 ########################################
 
-# Menu latéral simple pour naviguer entre les différentes vues de l'application.
-page = st.sidebar.selectbox(
-    "",
-    ["Dashboard", "Tendances", "Mon profil santé", "Favoris", "Admin"],
-    label_visibility="collapsed"
-)
+render_top_menu("Dashboard")
 
 # Variables de session liées au profil santé :
 # - `health_profile` : profil complet
@@ -120,54 +111,6 @@ if "health_profile" not in st.session_state:
     st.session_state.health_profile = None
 if "use_health_profile" not in st.session_state:
     st.session_state.use_health_profile = False
-
-# Si admin -> on exécute admin et on stop ici (sinon le dashboard s'affiche aussi)
-if page == "Admin":
-    # Page d'administration : on exécute la fonction dédiée puis on arrête l'exécution
-    # (sinon le code du dashboard s'exécuterait aussi).
-    run_admin()
-    st.stop()
-
-if page == "Tendances":
-    # Redirection explicite vers la page "Tendances" (analyses globales / graphiques).
-    try:
-        st.switch_page("pages/02_insights.py")
-    except Exception:
-        st.info("Veuillez ouvrir la page 'Tendances' via le menu latéral.")
-    st.stop()
-
-if page == "Mon profil santé":
-    # Redirection vers la page où l'utilisateur configure son profil santé.
-    try:
-        st.switch_page("pages/05_profil_sante.py")
-    except Exception:
-        st.info("Veuillez ouvrir la page 'Mon profil santé' via le menu latéral.")
-    st.stop()
-
-if page == "Favoris":
-    # Redirection vers la page "panier favori" (liste des produits favoris).
-    try:
-        st.switch_page("pages/04_panier_favori.py")
-    except Exception:
-        st.info("Veuillez ouvrir la page 'Favoris' via le menu latéral.")
-    st.stop()
-
-# ==============================
-#  DASHBOARD
-# ==============================
-
-# Titre principal du dashboard avec le logo sur la même ligne
-title_col1, title_col2 = st.columns([0.15, 0.85])
-with title_col1:
-    # Logo local, chemin basé sur l'emplacement de ce fichier
-    logo_path = os.path.join(os.path.dirname(__file__), "static", "logo", "logo_V2.png")
-    st.image(logo_path, width=100)
-with title_col2:
-    # Utilisation de markdown HTML pour mieux contrôler la mise en forme
-    st.markdown(
-        "<h1 style='margin-top: -10px; margin-bottom: 0;'>Application Santé & Nutrition</h1>",
-        unsafe_allow_html=True,
-    )
 
 ########################################
 # CONNEXION BD & ÉTAT DE SESSION
@@ -227,8 +170,39 @@ except Exception:
 ########################################
 # BARRE DE RECHERCHE & FILTRES PRINCIPAUX
 ########################################
-
+st.markdown("---")
 col1, col2, col3 = st.columns(3)
+
+st.markdown(
+    """
+    <style>
+    div[class*="st-key-fav_"] button {
+        min-width: 3rem;
+        padding: 0.35rem 0.8rem;
+        border-radius: 999px;
+        font-size: 1.3rem;
+        line-height: 1;
+        border: 1px solid rgba(225, 29, 72, 0.22);
+        color: #e11d48;
+        background: rgba(255, 241, 242, 0.96);
+        box-shadow: 0 4px 10px rgba(225, 29, 72, 0.08);
+    }
+
+    div[class*="st-key-fav_"] button[kind="primary"] {
+        border-color: rgba(225, 29, 72, 0.55);
+        color: #ffffff;
+        background: linear-gradient(135deg, #fb7185, #e11d48);
+        box-shadow: 0 8px 18px rgba(225, 29, 72, 0.2);
+    }
+
+    div[class*="st-key-fav_"] button:hover {
+        border-color: rgba(225, 29, 72, 0.5);
+        box-shadow: 0 8px 18px rgba(225, 29, 72, 0.16);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 with col1:
     # Recherche texte sur le nom du produit
@@ -693,26 +667,30 @@ for index, row in df_page.iterrows():
         )
         code_str = str(row["code"])
 
-        # Bouton de détail à l'intérieur de la carte
-        if st.button("Détails", key=f"detail_{code_str}"):
-            st.session_state.selected_code = code_str
-            try:
-                st.query_params["code"] = code_str
-            except AttributeError:
-                st.experimental_set_query_params(code=code_str)
+        action_col1, action_col2, action_col3 = st.columns([1.2, 1.1, 0.7])
 
-            try:
-                st.switch_page("pages/01_detail_produit.py")
-            except Exception:
-                st.info("Veuillez ouvrir la page 'Détail du produit' via le menu latéral.")
+        # Bouton de detail dans la meme ligne d'actions
+        with action_col1:
+            if st.button("Détails", key=f"detail_{code_str}", use_container_width=True):
+                st.session_state.selected_code = code_str
+                try:
+                    st.query_params["code"] = code_str
+                except AttributeError:
+                    st.experimental_set_query_params(code=code_str)
 
-        # Case à cocher pour sélectionner le produit dans le comparateur
+                try:
+                    st.switch_page("pages/01_detail_produit.py")
+                except Exception:
+                    st.info("Veuillez ouvrir la page 'Détail du produit' via le menu latéral.")
+
+        # Case a cocher pour selectionner le produit dans le comparateur, sur la meme ligne
         compare_selected = code_str in st.session_state.compare_selection
-        new_value = st.checkbox(
-            "Comparer",
-            value=compare_selected,
-            key=f"compare_{code_str}",
-        )
+        with action_col2:
+            new_value = st.checkbox(
+                "Comparer",
+                value=compare_selected,
+                key=f"compare_{code_str}",
+            )
 
         if new_value and not compare_selected:
             if len(st.session_state.compare_selection) >= 3:
@@ -725,16 +703,25 @@ for index, row in df_page.iterrows():
                 c for c in st.session_state.compare_selection if c != code_str
             ]
 
-        # Bouton pour ajouter/enlever le produit des favoris (panier santé)
+        # Bouton favori au format coeur, sur la meme ligne d'actions
         is_favorite = code_str in st.session_state.favorites
-        fav_label = "Retirer des favoris" if is_favorite else "Ajouter aux favoris"
-        if st.button(fav_label, key=f"fav_{code_str}"):
-            if is_favorite:
-                st.session_state.favorites = [
-                    c for c in st.session_state.favorites if c != code_str
-                ]
-            else:
-                st.session_state.favorites.append(code_str)
+        fav_label = "❤️" if is_favorite else "♡"
+        fav_help = "Retirer des favoris" if is_favorite else "Ajouter aux favoris"
+        with action_col3:
+            if st.button(
+                fav_label,
+                key=f"fav_{code_str}",
+                help=fav_help,
+                type="primary" if is_favorite else "secondary",
+                use_container_width=True,
+            ):
+                if is_favorite:
+                    st.session_state.favorites = [
+                        c for c in st.session_state.favorites if c != code_str
+                    ]
+                else:
+                    st.session_state.favorites.append(code_str)
+        st.markdown("---")
 
 # ==============================
 # ⬅️ ➡️ BOUTONS PAGINATION (sauf accueil aléatoire)
