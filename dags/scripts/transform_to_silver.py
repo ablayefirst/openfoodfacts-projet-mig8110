@@ -12,9 +12,11 @@ from typing import Any
 
 import boto3
 import pandas as pd
+import psycopg2
 import pyarrow as pa
 import pyarrow.parquet as pq
 from botocore.client import Config
+from psycopg2.extras import Json
 
 try:
     import yaml
@@ -168,6 +170,74 @@ def get_s3_client():
         config=Config(signature_version="s3v4"),
         region_name="us-east-1",
     )
+
+
+def get_pg_connection():
+    return psycopg2.connect(
+        host=os.getenv("POSTGRES_HOST", "postgres"),
+        port=os.getenv("POSTGRES_PORT", "5432"),
+        dbname=os.getenv("POSTGRES_DB", "openfood_db"),
+        user=os.getenv("POSTGRES_USER", "postgres"),
+        password=os.getenv("POSTGRES_PASSWORD", "postgres123"),
+    )
+
+
+def ensure_manual_review_tables(conn) -> None:
+    ddl = """
+        CREATE TABLE IF NOT EXISTS rejected_products_review (
+            rejected_id SERIAL PRIMARY KEY,
+            code_produit TEXT NOT NULL,
+            product_name TEXT,
+            brands TEXT,
+            raw_payload JSONB NOT NULL,
+            quality_issues JSONB NOT NULL,
+            source_run_id TEXT,
+            source_task TEXT,
+            import_type TEXT,
+            review_status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (review_status IN ('pending', 'in_review', 'corrected', 'resolved', 'ignored')),
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS manual_product_corrections (
+            correction_id SERIAL PRIMARY KEY,
+            rejected_id INTEGER REFERENCES rejected_products_review(rejected_id) ON DELETE SET NULL,
+            code_produit TEXT NOT NULL,
+            product_name_manual TEXT,
+            brands_manual TEXT,
+            categories_manual TEXT,
+            categories_tags_manual JSONB,
+            categorie_principale_manual TEXT,
+            ingredients_text_manual TEXT,
+            commentaire TEXT,
+            corrected_by TEXT,
+            correction_status TEXT NOT NULL DEFAULT 'draft'
+                CHECK (correction_status IN ('draft', 'ready_for_pipeline', 'applied', 'rejected', 'archived')),
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_rejected_products_review_code
+        ON rejected_products_review(code_produit);
+
+        CREATE INDEX IF NOT EXISTS idx_rejected_products_review_status
+        ON rejected_products_review(review_status, created_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_manual_product_corrections_code
+        ON manual_product_corrections(code_produit);
+
+        CREATE INDEX IF NOT EXISTS idx_manual_product_corrections_status
+        ON manual_product_corrections(correction_status, is_active);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_manual_product_corrections_active_code
+        ON manual_product_corrections(code_produit)
+        WHERE is_active = TRUE;
+    """
+    with conn.cursor() as cur:
+        cur.execute(ddl)
+    conn.commit()
 
 
 def is_missing(value: Any) -> bool:
@@ -887,6 +957,294 @@ def normalize_tag_list(value: Any) -> list[str]:
     return out
 
 
+def infer_import_type() -> str:
+    source_mode = (os.getenv("OPENFOOD_SOURCE_MODE") or "").strip().lower()
+    import_mode = (os.getenv("OPENFOOD_IMPORT_MODE") or "").strip().lower()
+
+    if source_mode == "local":
+        return "local"
+    if import_mode:
+        return import_mode
+    if source_mode:
+        return source_mode
+    return "unknown"
+
+
+def _coerce_manual_tags(value: Any) -> list[str]:
+    if is_missing(value):
+        return []
+
+    raw_items = value
+    if isinstance(value, str):
+        txt = value.strip()
+        parsed = None
+        if txt.startswith("[") and txt.endswith("]"):
+            try:
+                parsed = json.loads(txt)
+            except json.JSONDecodeError:
+                try:
+                    parsed = ast.literal_eval(txt)
+                except (SyntaxError, ValueError):
+                    parsed = None
+        raw_items = parsed if parsed is not None else split_values(value)
+
+    if not isinstance(raw_items, (list, tuple, set)):
+        raw_items = [raw_items]
+
+    out = []
+    seen = set()
+    for item in raw_items:
+        txt = clean_text(item)
+        if txt is None or txt in seen:
+            continue
+        seen.add(txt)
+        out.append(txt)
+    return out
+
+
+def load_active_manual_corrections() -> dict[str, dict[str, Any]]:
+    query = """
+        SELECT
+            correction_id,
+            rejected_id,
+            code_produit,
+            product_name_manual,
+            brands_manual,
+            categories_manual,
+            categories_tags_manual,
+            categorie_principale_manual,
+            ingredients_text_manual,
+            commentaire,
+            corrected_by,
+            correction_status,
+            is_active,
+            created_at,
+            updated_at
+        FROM manual_product_corrections
+        WHERE is_active = TRUE
+          AND correction_status IN ('ready_for_pipeline', 'applied')
+        ORDER BY updated_at DESC, correction_id DESC
+    """
+
+    corrections: dict[str, dict[str, Any]] = {}
+    conn = get_pg_connection()
+    try:
+        ensure_manual_review_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute(query)
+            for row in cur.fetchall():
+                code = normalize_code(row[2])
+                if code is None or code in corrections:
+                    continue
+                corrections[code] = {
+                    "correction_id": row[0],
+                    "rejected_id": row[1],
+                    "code_produit": code,
+                    "product_name_manual": clean_text(row[3]),
+                    "brands_manual": clean_text(row[4]),
+                    "categories_manual": clean_text(row[5]),
+                    "categories_tags_manual": _coerce_manual_tags(row[6]),
+                    "categorie_principale_manual": clean_text(row[7]),
+                    "ingredients_text_manual": clean_text(row[8]),
+                    "commentaire": clean_text(row[9]),
+                    "corrected_by": clean_text(row[10]),
+                    "correction_status": clean_text(row[11]),
+                    "is_active": bool(row[12]),
+                    "created_at": row[13],
+                    "updated_at": row[14],
+                }
+    finally:
+        conn.close()
+
+    return corrections
+
+
+def apply_manual_correction(
+    product: dict[str, Any],
+    correction: dict[str, Any] | None,
+    stats: dict[str, int] | None = None,
+) -> tuple[dict[str, Any], bool]:
+    if correction is None:
+        return product, False
+
+    merged = dict(product)
+    applied = False
+
+    field_map = {
+        "product_name_manual": "product_name",
+        "brands_manual": "brands",
+        "categories_manual": "categories",
+        "ingredients_text_manual": "ingredients_text",
+    }
+    for correction_field, product_field in field_map.items():
+        value = clean_text(correction.get(correction_field))
+        if value is None:
+            continue
+        merged[product_field] = value
+        applied = True
+
+    categories_tags_manual = _coerce_manual_tags(correction.get("categories_tags_manual"))
+    if categories_tags_manual:
+        merged["categories_tags"] = categories_tags_manual
+        applied = True
+
+    if clean_text(correction.get("categorie_principale_manual")) is not None:
+        applied = True
+
+    if applied and stats is not None:
+        stats["manual_corrections_applied"] = stats.get("manual_corrections_applied", 0) + 1
+
+    return merged, applied
+
+
+def upsert_rejected_product_reviews(
+    rejected_products: list[dict[str, Any]],
+    *,
+    source_task: str,
+    source_run_id: str | None = None,
+    import_type: str | None = None,
+) -> None:
+    if not rejected_products:
+        return
+
+    import_type = import_type or infer_import_type()
+    select_sql = """
+        SELECT rejected_id, review_status
+        FROM rejected_products_review
+        WHERE code_produit = %s
+        ORDER BY rejected_id DESC
+        LIMIT 1
+    """
+    update_sql = """
+        UPDATE rejected_products_review
+        SET product_name = %s,
+            brands = %s,
+            raw_payload = %s,
+            quality_issues = %s,
+            source_run_id = %s,
+            source_task = %s,
+            import_type = %s,
+            review_status = %s,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE rejected_id = %s
+    """
+    insert_sql = """
+        INSERT INTO rejected_products_review (
+            code_produit,
+            product_name,
+            brands,
+            raw_payload,
+            quality_issues,
+            source_run_id,
+            source_task,
+            import_type,
+            review_status
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+
+    conn = get_pg_connection()
+    try:
+        ensure_manual_review_tables(conn)
+        with conn.cursor() as cur:
+            for rejected in rejected_products:
+                code = normalize_code(rejected.get("code_produit"))
+                if code is None:
+                    continue
+
+                target_status = clean_text(rejected.get("review_status")) or "pending"
+                product_name = clean_text(rejected.get("product_name"))
+                brands = clean_text(rejected.get("brands"))
+                raw_payload = rejected.get("raw_payload") or {}
+                quality_issues = rejected.get("quality_issues") or []
+
+                cur.execute(select_sql, (code,))
+                existing = cur.fetchone()
+                if existing and existing[1] != "resolved":
+                    existing_status = existing[1]
+                    next_status = existing_status if existing_status == "ignored" and target_status == "pending" else target_status
+                    cur.execute(
+                        update_sql,
+                        (
+                            product_name,
+                            brands,
+                            Json(raw_payload),
+                            Json(quality_issues),
+                            source_run_id,
+                            source_task,
+                            import_type,
+                            next_status,
+                            existing[0],
+                        ),
+                    )
+                    continue
+
+                cur.execute(
+                    insert_sql,
+                    (
+                        code,
+                        product_name,
+                        brands,
+                        Json(raw_payload),
+                        Json(quality_issues),
+                        source_run_id,
+                        source_task,
+                        import_type,
+                        target_status,
+                    ),
+                )
+
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def resolve_rejected_product_reviews(codes: set[str]) -> None:
+    clean_codes = sorted({normalize_code(code) for code in codes if normalize_code(code) is not None})
+    if not clean_codes:
+        return
+
+    query = """
+        UPDATE rejected_products_review
+        SET review_status = 'resolved',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE code_produit = ANY(%s)
+          AND review_status <> 'resolved'
+    """
+
+    conn = get_pg_connection()
+    try:
+        ensure_manual_review_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute(query, (clean_codes,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_manual_correction_status(codes: set[str], status: str) -> None:
+    clean_codes = sorted({normalize_code(code) for code in codes if normalize_code(code) is not None})
+    if not clean_codes:
+        return
+
+    query = """
+        UPDATE manual_product_corrections
+        SET correction_status = %s,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE code_produit = ANY(%s)
+          AND is_active = TRUE
+    """
+
+    conn = get_pg_connection()
+    try:
+        ensure_manual_review_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute(query, (status, clean_codes))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def format_amount(value: float) -> str:
     return f"{value:.3f}".rstrip("0").rstrip(".")
 
@@ -1096,6 +1454,7 @@ def build_row(
     stats: dict[str, int],
     rules: dict[str, Any],
     recovery_mode: bool = False,
+    manual_correction: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     nutriments = product.get("nutriments") or {}
     if not isinstance(nutriments, dict):
@@ -1151,6 +1510,13 @@ def build_row(
         recovery_mode=recovery_mode,
     )
     categorie_principale, _ = classify_primary_category(categories_tags, categories_text, rules, stats)
+    manual_primary_category = None
+    if manual_correction is not None:
+        manual_primary_category = clean_text(manual_correction.get("categorie_principale_manual"))
+        if manual_primary_category is not None:
+            manual_primary_category = manual_primary_category.lower()
+            categorie_principale = manual_primary_category
+            stats["manual_primary_category_overrides"] = stats.get("manual_primary_category_overrides", 0) + 1
     if recovery_mode and not categorie_principale:
         categorie_principale = "autres"
     ingredients_text = normalize_ingredients_text(
@@ -1326,6 +1692,8 @@ def init_transform_stats() -> dict[str, int]:
         "primary_category_from_tags": 0,
         "primary_category_from_categories": 0,
         "primary_category_default": 0,
+        "manual_corrections_applied": 0,
+        "manual_primary_category_overrides": 0,
         "rule_replacements": 0,
         "rule_filtered": 0,
     }
