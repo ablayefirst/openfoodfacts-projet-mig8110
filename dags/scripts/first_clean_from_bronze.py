@@ -14,11 +14,18 @@ if SCRIPTS_DIR not in sys.path:
 
 from transform_to_silver import (
     OUTPUT_COLUMNS,
+    apply_manual_correction,
     build_row,
     evaluate_final_contract,
     get_s3_client,
+    infer_import_type,
     iter_json_lines,
+    load_active_manual_corrections,
     load_normalization_rules,
+    normalize_code,
+    resolve_rejected_product_reviews,
+    update_manual_correction_status,
+    upsert_rejected_product_reviews,
     write_empty_parquet,
     write_rows_chunk,
 )
@@ -62,6 +69,9 @@ def init_first_clean_stats() -> dict[str, int]:
         "nutriscore_inconsistent": 0,
         "energy_inconsistent": 0,
         "salt_sodium_inconsistent": 0,
+        "manual_corrections_loaded": 0,
+        "manual_corrections_applied": 0,
+        "manual_primary_category_overrides": 0,
     }
 
 
@@ -81,9 +91,13 @@ def first_clean_from_bronze(
     keys = derive_cleaning_keys(output_key)
     s3 = get_s3_client()
     rules, rules_source = load_normalization_rules()
+    manual_corrections = load_active_manual_corrections()
     obj = s3.get_object(Bucket=input_bucket, Key=input_key)
+    source_run_id = os.getenv("AIRFLOW_CTX_DAG_RUN_ID")
+    import_type = infer_import_type()
 
     stats = init_first_clean_stats()
+    stats["manual_corrections_loaded"] = len(manual_corrections)
     transform_stats = {
         "energy_imputed": 0,
         "energy_corrected": 0,
@@ -99,6 +113,8 @@ def first_clean_from_bronze(
         "primary_category_from_tags": 0,
         "primary_category_from_categories": 0,
         "primary_category_default": 0,
+        "manual_corrections_applied": 0,
+        "manual_primary_category_overrides": 0,
         "rule_replacements": 0,
         "rule_filtered": 0,
     }
@@ -113,6 +129,8 @@ def first_clean_from_bronze(
         bad_path = bad_tmp.name
 
     rows_batch: list[dict[str, object]] = []
+    rejected_reviews: list[dict[str, object]] = []
+    resolved_corrected_codes: set[str] = set()
     writer = None
 
     try:
@@ -134,20 +152,45 @@ def first_clean_from_bronze(
                     continue
 
                 stats["rows_input"] += 1
-                row = build_row(product, stats=transform_stats, rules=rules, recovery_mode=False)
+                code = normalize_code(product.get("code"))
+                correction = manual_corrections.get(code) if code is not None else None
+                corrected_product, correction_applied = apply_manual_correction(
+                    product,
+                    correction,
+                    stats=transform_stats,
+                )
+                row = build_row(
+                    corrected_product,
+                    stats=transform_stats,
+                    rules=rules,
+                    recovery_mode=False,
+                    manual_correction=correction,
+                )
                 issues = evaluate_final_contract(row)
 
                 if issues:
-                    bad_product = dict(product)
+                    bad_product = dict(corrected_product)
                     bad_product["_quality_contract_issues"] = issues
                     bad_handle.write(json.dumps(bad_product, ensure_ascii=False) + "\n")
                     stats["rows_bad"] += 1
+                    rejected_reviews.append(
+                        {
+                            "code_produit": row.get("code") or product.get("code"),
+                            "product_name": row.get("product_name") or product.get("product_name"),
+                            "brands": row.get("brands") or product.get("brands"),
+                            "raw_payload": bad_product,
+                            "quality_issues": issues,
+                            "review_status": "in_review" if correction_applied else "pending",
+                        }
+                    )
                     for issue in issues:
                         stats[issue] = stats.get(issue, 0) + 1
                     continue
 
                 rows_batch.append({column: row.get(column) for column in OUTPUT_COLUMNS})
                 stats["rows_good"] += 1
+                if correction_applied and row.get("code"):
+                    resolved_corrected_codes.add(str(row["code"]))
                 if len(rows_batch) >= chunk_size:
                     writer = write_rows_chunk(writer, rows_batch, good_path)
                     rows_batch = []
@@ -165,6 +208,14 @@ def first_clean_from_bronze(
     try:
         s3.upload_file(good_path, output_bucket, keys["good_key"])
         s3.upload_file(bad_path, output_bucket, keys["bad_key"])
+        upsert_rejected_product_reviews(
+            rejected_reviews,
+            source_task="first_clean_from_bronze",
+            source_run_id=source_run_id,
+            import_type=import_type,
+        )
+        resolve_rejected_product_reviews(resolved_corrected_codes)
+        update_manual_correction_status(resolved_corrected_codes, "applied")
         stats["rules_loaded"] = 0 if rules_source == "defaults" else 1
         stats.update(transform_stats)
 
