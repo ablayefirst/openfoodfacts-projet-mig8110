@@ -1,5 +1,3 @@
-version: "3.8"
-
 x-airflow-common: &airflow-common
   build:
     context: .
@@ -11,18 +9,14 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: ${AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION}
     AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY}
     AIRFLOW__WEBSERVER__BASE_URL: http://localhost:8080
-
-    # ⚠️ IMPORTANT : metadata Airflow -> airflow-postgres (pas postgres_openfood)
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@airflow-postgres:5432/${AIRFLOW_DB}
 
-    # Variables utiles à tes DAGs (DB métier)
     POSTGRES_HOST: postgres
     POSTGRES_PORT: ${POSTGRES_PORT}
     POSTGRES_DB: ${POSTGRES_DB}
     POSTGRES_USER: ${POSTGRES_USER}
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
 
-    # MinIO
     MINIO_ENDPOINT: ${MINIO_ENDPOINT}
     MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
     MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
@@ -59,7 +53,6 @@ x-airflow-common: &airflow-common
     - openfood_network
 
 services:
-  # ---------- POSTGRES METIER (OpenFood) ----------
   postgres:
     image: postgres:16
     container_name: postgres_openfood
@@ -71,8 +64,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
-      # (optionnel) scripts schema métier
-      # - ./database/openfood_init:/docker-entrypoint-initdb.d
     networks:
       - openfood_network
     healthcheck:
@@ -82,7 +73,6 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ---------- POSTGRES AIRFLOW METADATA ----------
   airflow-postgres:
     image: postgres:16
     container_name: airflow_postgres
@@ -101,7 +91,6 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ---------- MINIO ----------
   minio:
     image: minio/minio:latest
     container_name: minio_openfood
@@ -118,7 +107,6 @@ services:
       - openfood_network
     restart: unless-stopped
 
-  # ---------- MINIO INIT ----------
   minio-init:
     image: minio/mc:latest
     container_name: minio_init
@@ -137,7 +125,6 @@ services:
     networks:
       - openfood_network
 
-  # ---------- AIRFLOW INIT ----------
   airflow-init:
     <<: *airflow-common
     container_name: airflow_init
@@ -163,7 +150,6 @@ services:
       minio-init:
         condition: service_completed_successfully
 
-  # ---------- AIRFLOW WEBSERVER ----------
   airflow-webserver:
     <<: *airflow-common
     container_name: airflow_webserver
@@ -175,7 +161,6 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
-  # ---------- AIRFLOW SCHEDULER ----------
   airflow-scheduler:
     <<: *airflow-common
     container_name: airflow_scheduler
@@ -185,7 +170,6 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
-  # ---------- JUPYTER ----------
   jupyter:
     image: jupyter/datascience-notebook:latest
     container_name: jupyter_openfood
@@ -210,7 +194,6 @@ services:
       minio:
         condition: service_started
 
-  # ---------- ADMINER ----------
   adminer:
     image: adminer:latest
     container_name: adminer_openfood
@@ -222,7 +205,6 @@ services:
       postgres:
         condition: service_healthy
 
-  # ---------- STREAMLIT APP ----------
   streamlit-app:
     build:
       context: .
@@ -239,7 +221,7 @@ services:
       POSTGRES_SCHEMA: ${POSTGRES_SCHEMA}
     volumes:
       - ./streamlit_app:/app
-    working_dir: /app 
+    working_dir: /app
     command: streamlit run main.py --server.address=0.0.0.0 --server.port=8501
     networks:
       - openfood_network
@@ -247,6 +229,25 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+
+  build-similarity:
+    image: jupyter/datascience-notebook:latest
+    container_name: build_similarity_runner
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./dags:/home/jovyan/dags
+      - ./scripts:/home/jovyan/scripts
+      - ./requirements.txt:/tmp/requirements.txt
+    command: >
+      bash -c "
+      pip install -r /tmp/requirements.txt &&
+      python /home/jovyan/dags/scripts/build_similarity.py &&
+      echo 'Similarity DONE'
+      "
+    networks:
+      - openfood_network
 
 networks:
   openfood_network:
