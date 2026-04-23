@@ -181,10 +181,13 @@ CREATE TABLE IF NOT EXISTS produit_similaire (
     nb_ingredients_communs INTEGER,
     ingredients_communs TEXT,
     methode TEXT,
+    mode_sante TEXT,
     health_score_source NUMERIC,
     health_score_cible NUMERIC,
     PRIMARY KEY (code_produit_source, code_produit_cible, type_recommandation)
 );
+
+ALTER TABLE produit_similaire ADD COLUMN IF NOT EXISTS mode_sante TEXT;
 
 -- =====================================================
 -- INDEX POUR PERFORMANCE (APP WEB + ETL)

@@ -34,6 +34,75 @@ warnings.filterwarnings(
 )
 
 # ==============================
+# PARAMÈTRES UTILISATEUR
+# ==============================
+
+SIMILARITY_MODE_OPTIONS = {
+    "1 - Même catégorie": "meme_categorie",
+    "2 - Profil nutritionnel": "profil_nutritionnel",
+    "3 - Score nutritionnel global": "score_nutritionnel_global",
+    "4 - Niveau de transformation (NOVA)": "niveau_transformation_nova",
+}
+
+HEALTHIER_MODE_OPTIONS = {
+    "1 - Profil nutritionnel": "profil_nutritionnel",
+    "2 - Score nutritionnel global": "score_nutritionnel_global",
+    "3 - Niveau de transformation (NOVA)": "niveau_transformation_nova",
+}
+
+if "detail_similarity_mode_label" not in st.session_state:
+    st.session_state["detail_similarity_mode_label"] = "1 - Même catégorie"
+
+if "detail_healthier_mode_label" not in st.session_state:
+    st.session_state["detail_healthier_mode_label"] = "1 - Profil nutritionnel"
+
+st.markdown("### ⚙️ Paramètres de recommandation")
+
+param_col1, param_col2 = st.columns(2)
+
+with param_col1:
+    selected_similarity_label = st.selectbox(
+        "Mode des produits similaires",
+        options=list(SIMILARITY_MODE_OPTIONS.keys()),
+        index=list(SIMILARITY_MODE_OPTIONS.keys()).index(
+            st.session_state["detail_similarity_mode_label"]
+        ),
+        help="Choisissez comment les produits similaires sont recherchés."
+    )
+
+with param_col2:
+    selected_healthier_label = st.selectbox(
+        "Mode des alternatives plus saines",
+        options=list(HEALTHIER_MODE_OPTIONS.keys()),
+        index=list(HEALTHIER_MODE_OPTIONS.keys()).index(
+            st.session_state["detail_healthier_mode_label"]
+        ),
+        help="Choisissez comment les alternatives plus saines sont recherchées."
+    )
+
+st.session_state["detail_similarity_mode_label"] = selected_similarity_label
+st.session_state["detail_healthier_mode_label"] = selected_healthier_label
+
+selected_similarity_method = SIMILARITY_MODE_OPTIONS[selected_similarity_label]
+selected_healthier_method = HEALTHIER_MODE_OPTIONS[selected_healthier_label]
+
+# ==============================
+# CHOIX TYPE RECOMMANDATION
+# ==============================
+
+st.markdown("### 🔘 Type de recommandation")
+
+choice_col1, choice_col2 = st.columns(2)
+
+with choice_col1:
+    show_similarity = st.checkbox("Produits similaires", value=True)
+
+with choice_col2:
+    show_healthier = st.checkbox("Alternatives plus saines", value=True)
+
+show_recommendations_warning = not show_similarity and not show_healthier
+
+# ==============================
 # RÉCUPÉRATION DU CODE PRODUIT
 # ==============================
 
@@ -142,6 +211,11 @@ SELECT
     ps.score_similarite,
     ps.nb_ingredients_communs,
     ps.ingredients_communs,
+    ps.methode,
+    ps.mode_sante,
+    ps.type_recommandation,
+    ps.health_score_source,
+    ps.health_score_cible,
     p.nom_produit,
     p.image_url,
     p.image_small_url,
@@ -153,6 +227,7 @@ JOIN produit p
     ON ps.code_produit_cible = p.code_produit
 WHERE ps.code_produit_source = %s
   AND ps.type_recommandation = 'similaire'
+  AND ps.methode = %s
 ORDER BY ps.score_similarite DESC
 LIMIT 5
 """
@@ -163,6 +238,11 @@ SELECT
     ps.score_similarite,
     ps.nb_ingredients_communs,
     ps.ingredients_communs,
+    ps.methode,
+    ps.mode_sante,
+    ps.type_recommandation,
+    ps.health_score_source,
+    ps.health_score_cible,
     p.nom_produit,
     p.image_url,
     p.image_small_url,
@@ -174,6 +254,7 @@ JOIN produit p
     ON ps.code_produit_cible = p.code_produit
 WHERE ps.code_produit_source = %s
   AND ps.type_recommandation = 'plus_saine'
+  AND ps.methode = %s
 ORDER BY ps.score_similarite DESC
 LIMIT 5
 """
@@ -214,6 +295,17 @@ if detail_df.empty:
 
 row = detail_df.iloc[0]
 
+similar_df = pd.read_sql(
+    SIMILAR_PRODUCTS_QUERY,
+    conn,
+    params=(code, selected_similarity_method)
+)
+
+healthier_df = pd.read_sql(
+    HEALTHIER_PRODUCTS_QUERY,
+    conn,
+    params=(code, selected_healthier_method)
+)
 similar_df = read_optional_recommendations(SIMILAR_PRODUCTS_QUERY, code)
 healthier_df = read_optional_recommendations(HEALTHIER_PRODUCTS_QUERY, code)
 
@@ -526,20 +618,15 @@ def compute_health_score_oms(sugar, salt, fat_sat, fiber, proteins, nova, nutris
 
     score = 100.0
 
-    # Références utilisées pour guider le scoring
     WHO_SUGAR_IDEAL = 25.0
     WHO_SUGAR_MAX = 50.0
     WHO_SALT_MAX = 5.0
     WHO_SAT_FAT_MAX = 22.0
     WHO_FIBER_MIN = 25.0
 
-    # ----------------------------
-    # 1. Pénalité sucre
-    # ----------------------------
     try:
         if sugar is not None and pd.notna(sugar):
             sugar = float(sugar)
-
             sugar_ratio_ideal = sugar / WHO_SUGAR_IDEAL
             sugar_ratio_max = sugar / WHO_SUGAR_MAX
 
@@ -559,9 +646,6 @@ def compute_health_score_oms(sugar, salt, fat_sat, fiber, proteins, nova, nutris
     except (TypeError, ValueError):
         pass
 
-    # ----------------------------
-    # 2. Pénalité sel
-    # ----------------------------
     try:
         if salt is not None and pd.notna(salt):
             salt = float(salt)
@@ -582,9 +666,6 @@ def compute_health_score_oms(sugar, salt, fat_sat, fiber, proteins, nova, nutris
     except (TypeError, ValueError):
         pass
 
-    # ----------------------------
-    # 3. Pénalité graisses saturées
-    # ----------------------------
     try:
         if fat_sat is not None and pd.notna(fat_sat):
             fat_sat = float(fat_sat)
@@ -605,9 +686,6 @@ def compute_health_score_oms(sugar, salt, fat_sat, fiber, proteins, nova, nutris
     except (TypeError, ValueError):
         pass
 
-    # ----------------------------
-    # 4. Bonus fibres
-    # ----------------------------
     try:
         if fiber is not None and pd.notna(fiber):
             fiber = float(fiber)
@@ -624,9 +702,6 @@ def compute_health_score_oms(sugar, salt, fat_sat, fiber, proteins, nova, nutris
     except (TypeError, ValueError):
         pass
 
-    # ----------------------------
-    # 5. Bonus protéines
-    # ----------------------------
     try:
         if proteins is not None and pd.notna(proteins):
             proteins = float(proteins)
@@ -638,9 +713,6 @@ def compute_health_score_oms(sugar, salt, fat_sat, fiber, proteins, nova, nutris
     except (TypeError, ValueError):
         pass
 
-    # ----------------------------
-    # 6. Ajustement NOVA
-    # ----------------------------
     try:
         if nova is not None and pd.notna(nova):
             nova = int(nova)
@@ -654,9 +726,6 @@ def compute_health_score_oms(sugar, salt, fat_sat, fiber, proteins, nova, nutris
     except (TypeError, ValueError):
         pass
 
-    # ----------------------------
-    # 7. Ajustement NutriScore
-    # ----------------------------
     try:
         nutriscore = str(nutriscore).upper()
 
@@ -677,6 +746,86 @@ def compute_health_score_oms(sugar, salt, fat_sat, fiber, proteins, nova, nutris
     return round(score, 2)
 
 
+def mode_explanation(label):
+    if label == "1 - Même catégorie":
+        return "Produits proches selon l’appartenance à la même catégorie principale."
+    elif label == "2 - Profil nutritionnel":
+        return "Produits proches selon la proximité du sucre, du sel, des graisses saturées, des fibres et des protéines."
+    elif label == "3 - Score nutritionnel global":
+        return "Produits proches selon la proximité du score nutritionnel global basé sur le NutriScore."
+    elif label == "4 - Niveau de transformation (NOVA)":
+        return "Produits proches selon la proximité du niveau de transformation alimentaire."
+    elif label == "1 - Profil nutritionnel":
+        return "Alternatives plus saines selon la proximité du sucre, du sel, des graisses saturées, des fibres et des protéines."
+    elif label == "2 - Score nutritionnel global":
+        return "Alternatives plus saines selon le score nutritionnel global basé sur le NutriScore."
+    elif label == "3 - Niveau de transformation (NOVA)":
+        return "Alternatives plus saines selon le niveau de transformation alimentaire."
+    return ""
+
+
+def show_similarity_extra_info(sim_row, selected_method):
+    if selected_method == "meme_categorie":
+        st.markdown("**Logique :** même catégorie principale.")
+    elif selected_method == "profil_nutritionnel":
+        st.markdown("**Logique :** proximité du profil nutritionnel.")
+    elif selected_method == "score_nutritionnel_global":
+        st.markdown("**Logique :** proximité du NutriScore.")
+    elif selected_method == "niveau_transformation_nova":
+        st.markdown("**Logique :** proximité du groupe NOVA.")
+
+
+def render_recommendation_section(
+    title,
+    selected_label,
+    selected_method,
+    df_results,
+    button_prefix,
+    show_health_scores=False,
+):
+    st.markdown(f"## {title}")
+    st.caption(f"Mode sélectionné : {selected_label}")
+    st.caption(mode_explanation(selected_label))
+
+    if df_results.empty:
+        st.info(f"Aucun résultat trouvé pour : {selected_label}.")
+        return
+
+    for _, sim in df_results.iterrows():
+        col1, col2 = st.columns([0.25, 0.75])
+
+        with col1:
+            sim_img = sim.get("image_url") or sim.get("image_small_url")
+            if pd.notna(sim_img) and str(sim_img).strip() != "":
+                st.image(str(sim_img), width=120)
+
+        with col2:
+            st.markdown(f"### {sim.get('nom_produit', 'Produit sans nom')}")
+            st.markdown(f"**Score de similarité :** {sim.get('score_similarite', 0)}")
+            st.markdown(f"**Catégorie :** {sim.get('categorie_principale', 'Non spécifiée')}")
+            st.markdown(f"**NutriScore :** {sim.get('nutrition_grade', 'N/A')}")
+            st.markdown(f"**Groupe NOVA :** {sim.get('nova_group', 'N/A')}")
+
+            if show_health_scores:
+                st.markdown(f"**Score santé source :** {sim.get('health_score_source', 'N/A')}")
+                st.markdown(f"**Score santé cible :** {sim.get('health_score_cible', 'N/A')}")
+
+            show_similarity_extra_info(sim, selected_method)
+
+            button_key = f"{button_prefix}_{selected_method}_{sim['code_produit_cible']}"
+            button_label = f"Voir détail {sim['code_produit_cible']}"
+
+            if st.button(button_label, key=button_key):
+                st.session_state["selected_code"] = sim["code_produit_cible"]
+                try:
+                    st.query_params["code"] = str(sim["code_produit_cible"])
+                except AttributeError:
+                    st.experimental_set_query_params(code=str(sim["code_produit_cible"]))
+                st.rerun()
+
+        st.markdown("---")
+
+
 # ==============================
 # 🚨 SYSTÈME D’ALERTES
 # ==============================
@@ -686,51 +835,66 @@ has_major_alert = False
 
 try:
     if pd.notna(sugar) and float(sugar) > 15:
-        alerts.append(("error", f"⚠️ Produit très sucré ({float(sugar):.1f} g/100g)"))
+        alerts.append(("error", f" Produit très sucré ({float(sugar):.1f} g/100g)"))
         has_major_alert = True
     elif pd.notna(sugar) and float(sugar) > 10:
-        alerts.append(("warning", f"⚠️ Produit assez sucré ({float(sugar):.1f} g/100g)"))
+        alerts.append(("warning", f" Produit assez sucré ({float(sugar):.1f} g/100g)"))
 except (TypeError, ValueError) as e:
     st.error(f"Erreur lors de la vérification du sucre : {e}")
 
 try:
     if pd.notna(salt) and float(salt) > 1.5:
-        alerts.append(("error", f"⚠️ Produit très salé ({float(salt):.1f} g/100g)"))
+        alerts.append(("error", f" Produit très salé ({float(salt):.1f} g/100g)"))
         has_major_alert = True
     elif pd.notna(salt) and float(salt) > 0.6:
-        alerts.append(("warning", f"⚠️ Produit assez salé ({float(salt):.1f} g/100g)"))
+        alerts.append(("warning", f" Produit assez salé ({float(salt):.1f} g/100g)"))
 except (TypeError, ValueError) as e:
     st.error(f"Erreur lors de la vérification du sel : {e}")
 
 try:
     if pd.notna(fat_sat) and float(fat_sat) > 5:
-        alerts.append(("warning", f"⚠️ Riche en graisses saturées ({float(fat_sat):.1f} g/100g)"))
+        alerts.append(("warning", f" Riche en graisses saturées ({float(fat_sat):.1f} g/100g)"))
         has_major_alert = True
     elif pd.notna(fat_sat) and float(fat_sat) > 3:
-        alerts.append(("warning", f"⚠️ Graisses saturées modérées ({float(fat_sat):.1f} g/100g)"))
+        alerts.append(("warning", f" Graisses saturées modérées ({float(fat_sat):.1f} g/100g)"))
 except (TypeError, ValueError):
     pass
 
 try:
     if pd.notna(nova) and int(nova) == 4:
-        alerts.append(("error", "⚠️ Produit ultra-transformé (NOVA 4)"))
+        alerts.append(("error", " Produit ultra-transformé (NOVA 4)"))
         has_major_alert = True
     elif pd.notna(nova) and int(nova) == 3:
-        alerts.append(("warning", "⚠️ Produit transformé (NOVA 3)"))
+        alerts.append(("warning", " Produit transformé (NOVA 3)"))
 except (TypeError, ValueError):
     pass
 
 if nutriscore in ["D", "E"]:
-    alerts.append(("error", f"⚠️ Qualité nutritionnelle faible (NutriScore {nutriscore})"))
+    alerts.append(("error", f" Qualité nutritionnelle faible (NutriScore {nutriscore})"))
     has_major_alert = True
 elif nutriscore == "C":
-    alerts.append(("warning", "⚠️ Qualité nutritionnelle moyenne (NutriScore C)"))
+    alerts.append(("warning", " Qualité nutritionnelle moyenne (NutriScore C)"))
 
 if nutriscore in ["A", "B"] and not has_major_alert:
-    alerts.append(("success", "✅ Bon choix nutritionnel"))
+    alerts.append(("success", " Bon choix nutritionnel"))
 
 # ==============================
 # AFFICHAGE ALERTES
+# ==============================
+
+if alerts:
+    st.markdown("## Analyse nutritionnelle")
+
+    for level, message in alerts:
+        if level == "error":
+            st.error(message)
+        elif level == "warning":
+            st.warning(message)
+        elif level == "success":
+            st.success(message)
+
+# ==============================
+# 💚 SCORE SANTÉ
 # ==============================
 
 score = compute_health_score_oms(
@@ -742,6 +906,22 @@ score = compute_health_score_oms(
     nova=nova,
     nutriscore=nutriscore
 )
+
+st.markdown("## Score santé")
+st.metric("Score global", round(score, 2))
+
+if score >= 75:
+    st.success("Produit globalement intéressant sur le plan nutritionnel")
+elif score >= 50:
+    st.info("Produit acceptable, avec quelques limites")
+else:
+    st.warning("Produit à consommer avec modération")
+
+# ==============================
+# 🧠 ANALYSE INTELLIGENTE
+# ==============================
+
+st.markdown("## Analyse intelligente")
 
 explications = []
 
@@ -804,7 +984,6 @@ try:
 except (TypeError, ValueError):
     pass
 
-# Décision finale basée sur le score uniquement
 if score >= 75:
     niveau_risque = "bon"
 elif score >= 50:
@@ -831,6 +1010,13 @@ for level, message in alerts:
 
 if not alerts_html:
     alerts_html = "<li class='alert-item success'>Aucune alerte nutritionnelle majeure detectee.</li>"
+    st.error("Produit à risque nutritionnel élevé")
+elif niveau_risque == "modéré":
+    st.warning("Produit acceptable, mais avec plusieurs limites nutritionnelles")
+else:
+    st.success("Produit globalement sain")
+
+st.markdown("### Explication")
 
 exp_html = ""
 if explications:
@@ -885,9 +1071,11 @@ with analysis_col3:
     )
 
 # ==============================
-# PRODUITS SIMILAIRES
+# MESSAGE SI RIEN N'EST COCHÉ
 # ==============================
 
+if show_recommendations_warning:
+    st.warning("Veuillez sélectionner au moins un type de recommandation pour afficher les suggestions.")
 st.markdown("---")
 st.markdown("## 🔍 Produits similaires")
 st.caption("Produits proches en composition et en catégorie.")
@@ -919,18 +1107,20 @@ else:
             st.markdown(f"**Ingrédients communs :** {sim.get('ingredients_communs', 'Aucun')}")
             st.markdown(f"**Nombre d’ingrédients communs :** {sim.get('nb_ingredients_communs', 0)}")
 
-            if st.button(
-                f"Voir détail similaire {sim['code_produit_cible']}",
-                key=f"sim_{sim['code_produit_cible']}"
-            ):
-                st.session_state["selected_code"] = sim["code_produit_cible"]
-                try:
-                    st.query_params["code"] = str(sim["code_produit_cible"])
-                except AttributeError:
-                    st.experimental_set_query_params(code=str(sim["code_produit_cible"]))
-                st.rerun()
+# ==============================
+# PRODUITS SIMILAIRES
+# ==============================
 
-        st.markdown("---")
+if show_similarity:
+    st.markdown("---")
+    render_recommendation_section(
+        title="Produits similaires",
+        selected_label=selected_similarity_label,
+        selected_method=selected_similarity_method,
+        df_results=similar_df,
+        button_prefix="sim",
+        show_health_scores=False,
+    )
 
 # ==============================
 # ALTERNATIVES PLUS SAINES
@@ -975,6 +1165,16 @@ else:
                 st.rerun()
 
         st.markdown("---")
+if show_healthier:
+    st.markdown("---")
+    render_recommendation_section(
+        title="Alternatives plus saines",
+        selected_label=selected_healthier_label,
+        selected_method=selected_healthier_method,
+        df_results=healthier_df,
+        button_prefix="healthy",
+        show_health_scores=True,
+    )
 
 try:
     conn.close()
