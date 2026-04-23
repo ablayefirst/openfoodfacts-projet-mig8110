@@ -52,9 +52,10 @@ def not_empty(obj: dict[str, Any], key: str) -> bool:
 
 def has_country(product: dict[str, Any], country: str) -> bool:
     country = country.lower()
+    country_slug = country.replace(" ", "-")
     countries = str(product.get("countries") or "").lower()
     tags = [str(tag).lower() for tag in (product.get("countries_tags") or [])]
-    return country in countries or f"en:{country}" in tags
+    return country in countries or f"en:{country_slug}" in tags
 
 
 def value_present(value: Any) -> bool:
@@ -662,6 +663,12 @@ def stream_filter_url(
                     if not line:
                         continue
                     stats["lines_read"] += 1
+                    if stats["lines_read"] % 500_000 == 0:
+                        print(
+                            f"Progress: lines_read={stats['lines_read']:,}, "
+                            f"rows_kept={stats['rows_kept']}, "
+                            f"dropped_country={stats['dropped_country']:,}"
+                        )
                     try:
                         product = json.loads(line)
                     except json.JSONDecodeError:
