@@ -7,7 +7,6 @@ import streamlit as st
 MENU_ITEMS = [
     "Dashboard",
     "Tendances",
-    "Mon profil santé",
     "Favoris",
     "Admin",
 ]
@@ -146,8 +145,6 @@ def render_top_menu(current_page: str) -> None:
                         st.switch_page("main.py")
                     elif label == "Tendances":
                         st.switch_page("pages/02_insights.py")
-                    elif label == "Mon profil santé":
-                        st.switch_page("pages/05_profil_sante.py")
                     elif label == "Favoris":
                         st.switch_page("pages/04_panier_favori.py")
                     elif label == "Admin":
