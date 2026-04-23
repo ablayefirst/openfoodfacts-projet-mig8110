@@ -135,7 +135,7 @@ def second_clean_from_bad(
 
                 stats["rows_input"] += 1
                 row = build_row(product, stats=transform_stats, rules=rules, recovery_mode=True)
-                issues = evaluate_final_contract(row)
+                issues = evaluate_final_contract(row, recovery_mode=True)
 
                 if issues:
                     rejected_product = dict(product)

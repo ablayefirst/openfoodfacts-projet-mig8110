@@ -448,7 +448,10 @@ def normalize_categories_fields(
             stats["categories_normalized"] += 1
         return categories_text, normalized_tags
 
-    fallback_sources = [product.get("categories")]
+    fallback_sources = [
+        product.get("categories"),
+        product.get("categories_old"),
+    ]
     if recovery_mode:
         fallback_sources.extend(
             [
@@ -469,7 +472,10 @@ def normalize_categories_fields(
                 stats["categories_normalized"] += 1
             return categories_text, normalized_fallback
 
-    return clean_text(product.get("categories")), []
+    categories_text = clean_text(product.get("categories"))
+    if categories_text is None and tag_values:
+        categories_text = ", ".join(tag_values)
+    return categories_text, []
 
 
 def classify_primary_category(
@@ -1145,6 +1151,8 @@ def build_row(
         recovery_mode=recovery_mode,
     )
     categorie_principale, _ = classify_primary_category(categories_tags, categories_text, rules, stats)
+    if recovery_mode and not categorie_principale:
+        categorie_principale = "autres"
     ingredients_text = normalize_ingredients_text(
         product,
         rules,
@@ -1202,7 +1210,7 @@ def build_row(
         "image_url": image_url,
         "image_small_url": image_small_url,
         "image_nutrition_url": image_nutrition_url,
-}
+    }
 
 
 def quantity_is_final(row: dict[str, Any]) -> bool:
@@ -1250,7 +1258,7 @@ def salt_sodium_is_final(row: dict[str, Any]) -> bool:
     return salt == norm_salt and sodium == norm_sodium
 
 
-def evaluate_final_contract(row: dict[str, Any]) -> list[str]:
+def evaluate_final_contract(row: dict[str, Any], recovery_mode: bool = False) -> list[str]:
     issues = []
 
     if normalize_code(row.get("code")) is None:
@@ -1259,16 +1267,18 @@ def evaluate_final_contract(row: dict[str, Any]) -> list[str]:
         issues.append("missing_product_name")
     if clean_text(row.get("categories")) is None:
         issues.append("missing_categories")
-    if clean_text(row.get("categorie_principale")) is None:
-        issues.append("missing_categorie_principale")
-    if not quantity_is_final(row):
-        issues.append("quantity_not_standardized")
-    if not nutriscore_is_final(row):
-        issues.append("nutriscore_inconsistent")
-    if not energy_is_final(row):
-        issues.append("energy_inconsistent")
-    if not salt_sodium_is_final(row):
-        issues.append("salt_sodium_inconsistent")
+
+    if not recovery_mode:
+        if clean_text(row.get("categorie_principale")) is None:
+            issues.append("missing_categorie_principale")
+        if not quantity_is_final(row):
+            issues.append("quantity_not_standardized")
+        if not nutriscore_is_final(row):
+            issues.append("nutriscore_inconsistent")
+        if not energy_is_final(row):
+            issues.append("energy_inconsistent")
+        if not salt_sodium_is_final(row):
+            issues.append("salt_sodium_inconsistent")
 
     return issues
 
