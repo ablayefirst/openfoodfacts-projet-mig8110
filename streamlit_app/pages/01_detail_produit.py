@@ -883,7 +883,10 @@ if nutriscore in ["A", "B"] and not has_major_alert:
 # ==============================
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
+=======
+>>>>>>> 23f1bd859b60bee92ba8481701965a6398ca8615
 if alerts:
     st.markdown("## Analyse nutritionnelle")
 
@@ -899,7 +902,10 @@ if alerts:
 # 💚 SCORE SANTÉ
 # ==============================
 
+<<<<<<< HEAD
 >>>>>>> 94c838de5c9fd5f2708ca613b4ccfc9dc6afb309
+=======
+>>>>>>> 23f1bd859b60bee92ba8481701965a6398ca8615
 score = compute_health_score_oms(
     sugar=sugar,
     salt=salt,
@@ -911,7 +917,10 @@ score = compute_health_score_oms(
 )
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
+=======
+>>>>>>> 23f1bd859b60bee92ba8481701965a6398ca8615
 st.markdown("## Score santé")
 st.metric("Score global", round(score, 2))
 
@@ -928,7 +937,10 @@ else:
 
 st.markdown("## Analyse intelligente")
 
+<<<<<<< HEAD
 >>>>>>> 94c838de5c9fd5f2708ca613b4ccfc9dc6afb309
+=======
+>>>>>>> 23f1bd859b60bee92ba8481701965a6398ca8615
 explications = []
 
 try:
@@ -999,6 +1011,9 @@ else:
 
 if niveau_risque == "élevé":
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> 23f1bd859b60bee92ba8481701965a6398ca8615
     status_class = "status-bad"
     status_text = "Risque eleve"
     score_hint = "Produit a consommer avec moderation."
@@ -1014,6 +1029,7 @@ else:
 alerts_html = ""
 for level, message in alerts:
     alerts_html += f"<li class='alert-item {level}'>{escape(message)}</li>"
+<<<<<<< HEAD
 =======
     st.error("Produit à risque nutritionnel élevé")
 elif niveau_risque == "modéré":
@@ -1023,9 +1039,18 @@ else:
 
 st.markdown("### Explication")
 >>>>>>> 94c838de5c9fd5f2708ca613b4ccfc9dc6afb309
+=======
+>>>>>>> 23f1bd859b60bee92ba8481701965a6398ca8615
 
 if not alerts_html:
     alerts_html = "<li class='alert-item success'>Aucune alerte nutritionnelle majeure detectee.</li>"
+    st.error("Produit à risque nutritionnel élevé")
+elif niveau_risque == "modéré":
+    st.warning("Produit acceptable, mais avec plusieurs limites nutritionnelles")
+else:
+    st.success("Produit globalement sain")
+
+st.markdown("### Explication")
 
 exp_html = ""
 if explications:
@@ -1136,6 +1161,9 @@ if show_similarity:
 # ==============================
 
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> 23f1bd859b60bee92ba8481701965a6398ca8615
 st.markdown("## 🥗 Alternatives plus saines")
 st.caption("Produits proches en composition, avec une qualité nutritionnelle meilleure ou équivalente.")
 
@@ -1175,7 +1203,10 @@ else:
                 st.rerun()
 
         st.markdown("---")
+<<<<<<< HEAD
 =======
+=======
+>>>>>>> 23f1bd859b60bee92ba8481701965a6398ca8615
 if show_healthier:
     st.markdown("---")
     render_recommendation_section(
@@ -1186,7 +1217,10 @@ if show_healthier:
         button_prefix="healthy",
         show_health_scores=True,
     )
+<<<<<<< HEAD
 >>>>>>> 94c838de5c9fd5f2708ca613b4ccfc9dc6afb309
+=======
+>>>>>>> 23f1bd859b60bee92ba8481701965a6398ca8615
 
 try:
     conn.close()
