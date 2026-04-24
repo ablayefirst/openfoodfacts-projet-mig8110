@@ -11,7 +11,6 @@ from sqlalchemy import (
     select,
     func,
     Numeric,
-    Boolean,
     DateTime,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -107,23 +106,20 @@ class RejectedProductReview(Base):
     updated_at = Column(DateTime)
 
 
-class ManualProductCorrection(Base):
-    """Corrections manuelles saisies par l'utilisateur avant repassage pipeline."""
-    __tablename__ = "manual_product_corrections"
+class ProductCategorySuggestion(Base):
+    """Suggestion automatique de catégorie validable par l'utilisateur."""
+    __tablename__ = "product_category_suggestions"
 
-    correction_id = Column(Integer, primary_key=True)
+    suggestion_id = Column(Integer, primary_key=True)
     rejected_id = Column(Integer, ForeignKey("rejected_products_review.rejected_id"))
     code_produit = Column(Text, nullable=False)
-    product_name_manual = Column(Text)
-    brands_manual = Column(Text)
-    categories_manual = Column(Text)
-    categories_tags_manual = Column(JSONB)
-    categorie_principale_manual = Column(Text)
-    ingredients_text_manual = Column(Text)
-    commentaire = Column(Text)
-    corrected_by = Column(Text)
-    correction_status = Column(Text, nullable=False, default="draft")
-    is_active = Column(Boolean, nullable=False, default=True)
+    suggested_categories = Column(Text)
+    suggested_categories_tags = Column(JSONB)
+    suggested_categorie_principale = Column(Text)
+    suggestion_source = Column(Text, nullable=False)
+    suggestion_confidence = Column(Numeric(5, 2))
+    decision_status = Column(Text, nullable=False, default="suggested")
+    validated_by = Column(Text)
     created_at = Column(DateTime)
     updated_at = Column(DateTime)
 

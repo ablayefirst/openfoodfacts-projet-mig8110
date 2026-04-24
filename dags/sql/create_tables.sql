@@ -131,7 +131,7 @@ CREATE TABLE IF NOT EXISTS etl_import_history (
 );
 
 -- =====================================================
--- REVUE DES PRODUITS REJETES ET CORRECTIONS MANUELLES
+-- REVUE DES PRODUITS REJETES ET SUGGESTIONS DE CATEGORIES
 -- =====================================================
 
 CREATE TABLE IF NOT EXISTS rejected_products_review (
@@ -145,26 +145,30 @@ CREATE TABLE IF NOT EXISTS rejected_products_review (
     source_task TEXT,
     import_type TEXT,
     review_status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (review_status IN ('pending', 'in_review', 'corrected', 'resolved', 'ignored')),
+        CHECK (review_status IN ('pending', 'suggested', 'validated', 'resolved', 'ignored', 'needs_review')),
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS manual_product_corrections (
-    correction_id SERIAL PRIMARY KEY,
-    rejected_id INTEGER REFERENCES rejected_products_review(rejected_id) ON DELETE SET NULL,
+ALTER TABLE rejected_products_review
+DROP CONSTRAINT IF EXISTS rejected_products_review_review_status_check;
+
+ALTER TABLE rejected_products_review
+ADD CONSTRAINT rejected_products_review_review_status_check
+CHECK (review_status IN ('pending', 'suggested', 'validated', 'resolved', 'ignored', 'needs_review'));
+
+CREATE TABLE IF NOT EXISTS product_category_suggestions (
+    suggestion_id SERIAL PRIMARY KEY,
+    rejected_id INTEGER NOT NULL REFERENCES rejected_products_review(rejected_id) ON DELETE CASCADE,
     code_produit TEXT NOT NULL,
-    product_name_manual TEXT,
-    brands_manual TEXT,
-    categories_manual TEXT,
-    categories_tags_manual JSONB,
-    categorie_principale_manual TEXT,
-    ingredients_text_manual TEXT,
-    commentaire TEXT,
-    corrected_by TEXT,
-    correction_status TEXT NOT NULL DEFAULT 'draft'
-        CHECK (correction_status IN ('draft', 'ready_for_pipeline', 'applied', 'rejected', 'archived')),
-    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    suggested_categories TEXT,
+    suggested_categories_tags JSONB,
+    suggested_categorie_principale TEXT,
+    suggestion_source TEXT NOT NULL,
+    suggestion_confidence NUMERIC(5,2),
+    decision_status TEXT NOT NULL DEFAULT 'suggested'
+        CHECK (decision_status IN ('suggested', 'validated', 'rejected', 'needs_review', 'applied')),
+    validated_by TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -228,12 +232,14 @@ CREATE INDEX IF NOT EXISTS idx_rejected_products_review_code
 ON rejected_products_review(code_produit);
 CREATE INDEX IF NOT EXISTS idx_rejected_products_review_status
 ON rejected_products_review(review_status, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_manual_product_corrections_code
-ON manual_product_corrections(code_produit);
-CREATE INDEX IF NOT EXISTS idx_manual_product_corrections_status
-ON manual_product_corrections(correction_status, is_active);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_manual_product_corrections_active_code
-ON manual_product_corrections(code_produit)
-WHERE is_active = TRUE;
+CREATE INDEX IF NOT EXISTS idx_product_category_suggestions_code
+ON product_category_suggestions(code_produit);
+CREATE INDEX IF NOT EXISTS idx_product_category_suggestions_status
+ON product_category_suggestions(decision_status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_product_category_suggestions_rejected_id
+ON product_category_suggestions(rejected_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_product_category_suggestions_active
+ON product_category_suggestions(rejected_id)
+WHERE decision_status IN ('suggested', 'validated', 'needs_review');
 CREATE INDEX IF NOT EXISTS idx_produit_similaire_source_type
 ON produit_similaire(code_produit_source, type_recommandation);
