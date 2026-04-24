@@ -709,6 +709,73 @@ def stream_filter_url(
     return False
 
 
+def stream_local_file_to_jsonl(
+    source_path: Path,
+    output_path: Path,
+    country: str,
+    min_core_nutrients: int,
+    max_rows: int | None = None,
+) -> dict[str, int]:
+    """Lit un fichier local .jsonl ou .jsonl.gz, filtre par pays/nutriments et écrit un JSONL filtré."""
+    stats = {
+        "files_downloaded": 0,
+        "lines_read": 0,
+        "rows_kept": 0,
+        "invalid_json_lines": 0,
+        "dropped_country": 0,
+        "dropped_code": 0,
+        "dropped_name": 0,
+        "dropped_category": 0,
+        "dropped_nutrition": 0,
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    opener = gzip.open if str(source_path).endswith(".gz") else open
+
+    with opener(source_path, "rt", encoding="utf-8", errors="replace") as src, \
+         output_path.open("w", encoding="utf-8") as out:
+        for line in src:
+            line = line.strip()
+            if not line:
+                continue
+            stats["lines_read"] += 1
+            if stats["lines_read"] % 500_000 == 0:
+                print(
+                    f"Progress local: lines_read={stats['lines_read']:,}, "
+                    f"rows_kept={stats['rows_kept']}, "
+                    f"dropped_country={stats['dropped_country']:,}"
+                )
+            try:
+                product = json.loads(line)
+            except json.JSONDecodeError:
+                stats["invalid_json_lines"] += 1
+                continue
+            if not isinstance(product, dict):
+                stats["invalid_json_lines"] += 1
+                continue
+            if not has_country(product, country):
+                stats["dropped_country"] += 1
+                continue
+            if not not_empty(product, "code"):
+                stats["dropped_code"] += 1
+                continue
+            if not (not_empty(product, "product_name") or not_empty(product, "product_name_fr")):
+                stats["dropped_name"] += 1
+                continue
+            if not has_category(product):
+                stats["dropped_category"] += 1
+                continue
+            if min_core_nutrients > 0 and count_core_nutrients(product) < min_core_nutrients:
+                stats["dropped_nutrition"] += 1
+                continue
+            out.write(json.dumps(product, ensure_ascii=False) + "\n")
+            stats["rows_kept"] += 1
+            if max_rows is not None and stats["rows_kept"] >= max_rows:
+                break
+
+    stats["files_downloaded"] = 1
+    return stats
+
+
 def filter_product(product: dict[str, Any], country: str, min_core_nutrients: int) -> str | None:
     if not has_country(product, country):
         return None
@@ -971,21 +1038,35 @@ def extract_official_exports(
         if not local_source.exists():
             raise FileNotFoundError(f"Local source file not found: {local_source}")
 
-        metadata = build_local_source_metadata(local_source, output_dir)
-        metadata.update(
-            {
-                "files_downloaded": 0,
-                "lines_read": 0,
-                "rows_kept": 0,
-                "invalid_json_lines": 0,
-                "source_mode": "local",
-            }
+        suffix = datetime.now(timezone.utc).strftime("%Y%m%d")
+        output_path, bronze_key, silver_key = build_batch_paths(output_dir, "local", suffix, country)
+
+        print(
+            f"Mode local: filtrage de {local_source} -> {output_path} "
+            f"(pays={country}, max_rows={max_rows})"
+        )
+        stats = stream_local_file_to_jsonl(
+            source_path=local_source,
+            output_path=output_path,
+            country=country,
+            min_core_nutrients=min_core_nutrients,
+            max_rows=max_rows,
         )
         print(
-            "Local source selected: "
-            f"path={metadata['local_path']}, bronze={metadata['bronze_key']}, silver={metadata['silver_key']}"
+            f"Extraction locale terminée: lines_read={stats['lines_read']:,}, "
+            f"rows_kept={stats['rows_kept']}, dropped_country={stats['dropped_country']:,}"
         )
-        return metadata
+        return {
+            "import_type": "local",
+            "local_path": str(output_path),
+            "bronze_key": bronze_key,
+            "silver_key": silver_key,
+            "source_reference": str(local_source),
+            "source_start_ts": None,
+            "source_end_ts": None,
+            "source_mode": "local",
+            **stats,
+        }
 
     now_utc = datetime.now(timezone.utc)
     import_state = get_import_state()

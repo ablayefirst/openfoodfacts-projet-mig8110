@@ -195,26 +195,30 @@ def ensure_manual_review_tables(conn) -> None:
             source_task TEXT,
             import_type TEXT,
             review_status TEXT NOT NULL DEFAULT 'pending'
-                CHECK (review_status IN ('pending', 'in_review', 'corrected', 'resolved', 'ignored')),
+                CHECK (review_status IN ('pending', 'suggested', 'validated', 'resolved', 'ignored', 'needs_review')),
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
-        CREATE TABLE IF NOT EXISTS manual_product_corrections (
-            correction_id SERIAL PRIMARY KEY,
-            rejected_id INTEGER REFERENCES rejected_products_review(rejected_id) ON DELETE SET NULL,
+        ALTER TABLE rejected_products_review
+        DROP CONSTRAINT IF EXISTS rejected_products_review_review_status_check;
+
+        ALTER TABLE rejected_products_review
+        ADD CONSTRAINT rejected_products_review_review_status_check
+        CHECK (review_status IN ('pending', 'suggested', 'validated', 'resolved', 'ignored', 'needs_review'));
+
+        CREATE TABLE IF NOT EXISTS product_category_suggestions (
+            suggestion_id SERIAL PRIMARY KEY,
+            rejected_id INTEGER NOT NULL REFERENCES rejected_products_review(rejected_id) ON DELETE CASCADE,
             code_produit TEXT NOT NULL,
-            product_name_manual TEXT,
-            brands_manual TEXT,
-            categories_manual TEXT,
-            categories_tags_manual JSONB,
-            categorie_principale_manual TEXT,
-            ingredients_text_manual TEXT,
-            commentaire TEXT,
-            corrected_by TEXT,
-            correction_status TEXT NOT NULL DEFAULT 'draft'
-                CHECK (correction_status IN ('draft', 'ready_for_pipeline', 'applied', 'rejected', 'archived')),
-            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            suggested_categories TEXT,
+            suggested_categories_tags JSONB,
+            suggested_categorie_principale TEXT,
+            suggestion_source TEXT NOT NULL,
+            suggestion_confidence NUMERIC(5,2),
+            decision_status TEXT NOT NULL DEFAULT 'suggested'
+                CHECK (decision_status IN ('suggested', 'validated', 'rejected', 'needs_review', 'applied')),
+            validated_by TEXT,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
@@ -225,15 +229,18 @@ def ensure_manual_review_tables(conn) -> None:
         CREATE INDEX IF NOT EXISTS idx_rejected_products_review_status
         ON rejected_products_review(review_status, created_at DESC);
 
-        CREATE INDEX IF NOT EXISTS idx_manual_product_corrections_code
-        ON manual_product_corrections(code_produit);
+        CREATE INDEX IF NOT EXISTS idx_product_category_suggestions_code
+        ON product_category_suggestions(code_produit);
 
-        CREATE INDEX IF NOT EXISTS idx_manual_product_corrections_status
-        ON manual_product_corrections(correction_status, is_active);
+        CREATE INDEX IF NOT EXISTS idx_product_category_suggestions_status
+        ON product_category_suggestions(decision_status, created_at DESC);
 
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_manual_product_corrections_active_code
-        ON manual_product_corrections(code_produit)
-        WHERE is_active = TRUE;
+        CREATE INDEX IF NOT EXISTS idx_product_category_suggestions_rejected_id
+        ON product_category_suggestions(rejected_id);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_product_category_suggestions_active
+        ON product_category_suggestions(rejected_id)
+        WHERE decision_status IN ('suggested', 'validated', 'needs_review');
     """
     with conn.cursor() as cur:
         cur.execute(ddl)
@@ -1002,31 +1009,135 @@ def _coerce_manual_tags(value: Any) -> list[str]:
     return out
 
 
-def load_active_manual_corrections() -> dict[str, dict[str, Any]]:
-    query = """
+def _format_category_from_tag(tag: str) -> str | None:
+    normalized = normalize_tag(tag)
+    if normalized is None:
+        return None
+    return normalized.replace("-", " ").strip()
+
+
+def _build_category_suggestion_from_existing_products(
+    product_name: str | None,
+    brands: str | None,
+) -> dict[str, Any] | None:
+    if product_name is None and brands is None:
+        return None
+
+    normalized_name = canonicalize_text(product_name)
+    tokens = []
+    if normalized_name:
+        tokens = [token for token in normalized_name.split() if len(token) >= 4]
+    tokens = tokens[:4]
+
+    clauses = []
+    params: list[Any] = []
+
+    for token in tokens:
+        clauses.append("LOWER(p.nom_produit) LIKE %s")
+        params.append(f"%{token}%")
+
+    normalized_brand = canonicalize_text(brands)
+    if normalized_brand:
+        clauses.append("LOWER(COALESCE(m.brands, '')) = %s")
+        params.append(normalized_brand)
+
+    if not clauses:
+        return None
+
+    query = f"""
         SELECT
-            correction_id,
-            rejected_id,
-            code_produit,
-            product_name_manual,
-            brands_manual,
-            categories_manual,
-            categories_tags_manual,
-            categorie_principale_manual,
-            ingredients_text_manual,
-            commentaire,
-            corrected_by,
-            correction_status,
-            is_active,
-            created_at,
-            updated_at
-        FROM manual_product_corrections
-        WHERE is_active = TRUE
-          AND correction_status IN ('ready_for_pipeline', 'applied')
-        ORDER BY updated_at DESC, correction_id DESC
+            c.categorie,
+            COALESCE(NULLIF(p.categorie_principale, ''), 'autres') AS categorie_principale,
+            COUNT(*) AS hit_count
+        FROM produit p
+        LEFT JOIN marque m ON m.id_marque = p.id_marque
+        JOIN produit_categorie pc ON pc.code_produit = p.code_produit
+        JOIN categorie c ON c.id_categorie = pc.id_categorie
+        WHERE {" OR ".join(clauses)}
+        GROUP BY c.categorie, COALESCE(NULLIF(p.categorie_principale, ''), 'autres')
+        ORDER BY hit_count DESC, c.categorie ASC
+        LIMIT 5
     """
 
-    corrections: dict[str, dict[str, Any]] = {}
+    conn = get_pg_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return None
+
+    top_category = clean_text(rows[0][0])
+    top_primary = clean_text(rows[0][1]) or "autres"
+    top_hits = int(rows[0][2] or 0)
+    if top_category is None:
+        return None
+
+    return {
+        "suggested_categories": top_category,
+        "suggested_categories_tags": [f"en:{normalize_tag(top_category) or top_category.replace(' ', '-')}"],
+        "suggested_categorie_principale": top_primary,
+        "suggestion_source": "catalog_similarity",
+        "suggestion_confidence": round(min(0.4 + 0.1 * top_hits, 0.89), 2),
+    }
+
+
+def generate_category_suggestion(
+    product: dict[str, Any],
+    rules: dict[str, Any],
+) -> dict[str, Any] | None:
+    compared_to_category = clean_text(product.get("compared_to_category"))
+    if compared_to_category is not None:
+        pretty = _format_category_from_tag(compared_to_category)
+        if pretty:
+            primary, _ = classify_primary_category(
+                [normalize_tag(compared_to_category) or pretty.replace(" ", "-")],
+                pretty,
+                rules,
+                stats={
+                    "primary_category_assigned": 0,
+                    "primary_category_from_tags": 0,
+                    "primary_category_from_categories": 0,
+                    "primary_category_default": 0,
+                },
+            )
+            return {
+                "suggested_categories": pretty,
+                "suggested_categories_tags": [compared_to_category],
+                "suggested_categorie_principale": primary,
+                "suggestion_source": "compared_to_category",
+                "suggestion_confidence": 0.95,
+            }
+
+    product_name = pick_product_name(product, recovery_mode=True)
+    brands = normalize_brands(product, recovery_mode=True)
+    return _build_category_suggestion_from_existing_products(product_name, brands)
+
+
+def load_validated_category_suggestions() -> dict[str, dict[str, Any]]:
+    query = """
+        SELECT
+            suggestion_id,
+            rejected_id,
+            code_produit,
+            suggested_categories,
+            suggested_categories_tags,
+            suggested_categorie_principale,
+            suggestion_source,
+            suggestion_confidence,
+            decision_status,
+            validated_by,
+            created_at,
+            updated_at
+        FROM product_category_suggestions
+        WHERE decision_status IN ('validated', 'applied')
+        ORDER BY updated_at DESC, suggestion_id DESC
+    """
+
+    suggestions: dict[str, dict[str, Any]] = {}
     conn = get_pg_connection()
     try:
         ensure_manual_review_tables(conn)
@@ -1034,67 +1145,131 @@ def load_active_manual_corrections() -> dict[str, dict[str, Any]]:
             cur.execute(query)
             for row in cur.fetchall():
                 code = normalize_code(row[2])
-                if code is None or code in corrections:
+                if code is None or code in suggestions:
                     continue
-                corrections[code] = {
-                    "correction_id": row[0],
+                suggestions[code] = {
+                    "suggestion_id": row[0],
                     "rejected_id": row[1],
                     "code_produit": code,
-                    "product_name_manual": clean_text(row[3]),
-                    "brands_manual": clean_text(row[4]),
-                    "categories_manual": clean_text(row[5]),
-                    "categories_tags_manual": _coerce_manual_tags(row[6]),
-                    "categorie_principale_manual": clean_text(row[7]),
-                    "ingredients_text_manual": clean_text(row[8]),
-                    "commentaire": clean_text(row[9]),
-                    "corrected_by": clean_text(row[10]),
-                    "correction_status": clean_text(row[11]),
-                    "is_active": bool(row[12]),
-                    "created_at": row[13],
-                    "updated_at": row[14],
+                    "suggested_categories": clean_text(row[3]),
+                    "suggested_categories_tags": _coerce_manual_tags(row[4]),
+                    "suggested_categorie_principale": clean_text(row[5]),
+                    "suggestion_source": clean_text(row[6]),
+                    "suggestion_confidence": row[7],
+                    "decision_status": clean_text(row[8]),
+                    "validated_by": clean_text(row[9]),
+                    "created_at": row[10],
+                    "updated_at": row[11],
                 }
     finally:
         conn.close()
 
-    return corrections
+    return suggestions
 
 
-def apply_manual_correction(
+def apply_validated_category_suggestion(
     product: dict[str, Any],
-    correction: dict[str, Any] | None,
+    suggestion: dict[str, Any] | None,
     stats: dict[str, int] | None = None,
 ) -> tuple[dict[str, Any], bool]:
-    if correction is None:
+    if suggestion is None:
         return product, False
 
     merged = dict(product)
     applied = False
 
-    field_map = {
-        "product_name_manual": "product_name",
-        "brands_manual": "brands",
-        "categories_manual": "categories",
-        "ingredients_text_manual": "ingredients_text",
-    }
-    for correction_field, product_field in field_map.items():
-        value = clean_text(correction.get(correction_field))
-        if value is None:
-            continue
-        merged[product_field] = value
+    suggested_categories = clean_text(suggestion.get("suggested_categories"))
+    if suggested_categories is not None:
+        merged["categories"] = suggested_categories
         applied = True
 
-    categories_tags_manual = _coerce_manual_tags(correction.get("categories_tags_manual"))
-    if categories_tags_manual:
-        merged["categories_tags"] = categories_tags_manual
+    suggested_tags = _coerce_manual_tags(suggestion.get("suggested_categories_tags"))
+    if suggested_tags:
+        merged["categories_tags"] = suggested_tags
         applied = True
 
-    if clean_text(correction.get("categorie_principale_manual")) is not None:
+    if clean_text(suggestion.get("suggested_categorie_principale")) is not None:
         applied = True
 
     if applied and stats is not None:
-        stats["manual_corrections_applied"] = stats.get("manual_corrections_applied", 0) + 1
+        stats["category_suggestions_applied"] = stats.get("category_suggestions_applied", 0) + 1
 
     return merged, applied
+
+
+def upsert_category_suggestion(
+    cur,
+    *,
+    rejected_id: int,
+    code_produit: str,
+    suggestion: dict[str, Any] | None,
+) -> bool:
+    if suggestion is None:
+        return False
+
+    select_sql = """
+        SELECT suggestion_id, decision_status
+        FROM product_category_suggestions
+        WHERE rejected_id = %s
+        ORDER BY suggestion_id DESC
+        LIMIT 1
+    """
+    update_sql = """
+        UPDATE product_category_suggestions
+        SET suggested_categories = %s,
+            suggested_categories_tags = %s,
+            suggested_categorie_principale = %s,
+            suggestion_source = %s,
+            suggestion_confidence = %s,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE suggestion_id = %s
+    """
+    insert_sql = """
+        INSERT INTO product_category_suggestions (
+            rejected_id,
+            code_produit,
+            suggested_categories,
+            suggested_categories_tags,
+            suggested_categorie_principale,
+            suggestion_source,
+            suggestion_confidence,
+            decision_status
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 'suggested')
+    """
+
+    cur.execute(select_sql, (rejected_id,))
+    existing = cur.fetchone()
+    if existing:
+        existing_status = clean_text(existing[1]) or "suggested"
+        if existing_status in {"validated", "applied", "needs_review"}:
+            return True
+        cur.execute(
+            update_sql,
+            (
+                clean_text(suggestion.get("suggested_categories")),
+                Json(_coerce_manual_tags(suggestion.get("suggested_categories_tags")) or None),
+                clean_text(suggestion.get("suggested_categorie_principale")),
+                clean_text(suggestion.get("suggestion_source")) or "unknown",
+                suggestion.get("suggestion_confidence"),
+                existing[0],
+            ),
+        )
+        return True
+
+    cur.execute(
+        insert_sql,
+        (
+            rejected_id,
+            code_produit,
+            clean_text(suggestion.get("suggested_categories")),
+            Json(_coerce_manual_tags(suggestion.get("suggested_categories_tags")) or None),
+            clean_text(suggestion.get("suggested_categorie_principale")),
+            clean_text(suggestion.get("suggestion_source")) or "unknown",
+            suggestion.get("suggestion_confidence"),
+        ),
+    )
+    return True
 
 
 def upsert_rejected_product_reviews(
@@ -1103,6 +1278,7 @@ def upsert_rejected_product_reviews(
     source_task: str,
     source_run_id: str | None = None,
     import_type: str | None = None,
+    rules: dict[str, Any] | None = None,
 ) -> None:
     if not rejected_products:
         return
@@ -1141,6 +1317,7 @@ def upsert_rejected_product_reviews(
             review_status
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING rejected_id
     """
 
     conn = get_pg_connection()
@@ -1157,6 +1334,9 @@ def upsert_rejected_product_reviews(
                 brands = clean_text(rejected.get("brands"))
                 raw_payload = rejected.get("raw_payload") or {}
                 quality_issues = rejected.get("quality_issues") or []
+                suggestion = generate_category_suggestion(raw_payload, rules or DEFAULT_NORMALIZATION_RULES)
+                if target_status == "pending" and suggestion is not None:
+                    target_status = "suggested"
 
                 cur.execute(select_sql, (code,))
                 existing = cur.fetchone()
@@ -1177,6 +1357,12 @@ def upsert_rejected_product_reviews(
                             existing[0],
                         ),
                     )
+                    upsert_category_suggestion(
+                        cur,
+                        rejected_id=existing[0],
+                        code_produit=code,
+                        suggestion=suggestion,
+                    )
                     continue
 
                 cur.execute(
@@ -1192,6 +1378,13 @@ def upsert_rejected_product_reviews(
                         import_type,
                         target_status,
                     ),
+                )
+                inserted_rejected_id = cur.fetchone()[0]
+                upsert_category_suggestion(
+                    cur,
+                    rejected_id=inserted_rejected_id,
+                    code_produit=code,
+                    suggestion=suggestion,
                 )
 
         conn.commit()
@@ -1222,17 +1415,16 @@ def resolve_rejected_product_reviews(codes: set[str]) -> None:
         conn.close()
 
 
-def update_manual_correction_status(codes: set[str], status: str) -> None:
+def update_category_suggestion_status(codes: set[str], status: str) -> None:
     clean_codes = sorted({normalize_code(code) for code in codes if normalize_code(code) is not None})
     if not clean_codes:
         return
 
     query = """
-        UPDATE manual_product_corrections
-        SET correction_status = %s,
+        UPDATE product_category_suggestions
+        SET decision_status = %s,
             updated_at = CURRENT_TIMESTAMP
         WHERE code_produit = ANY(%s)
-          AND is_active = TRUE
     """
 
     conn = get_pg_connection()
@@ -1454,7 +1646,7 @@ def build_row(
     stats: dict[str, int],
     rules: dict[str, Any],
     recovery_mode: bool = False,
-    manual_correction: dict[str, Any] | None = None,
+    category_suggestion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     nutriments = product.get("nutriments") or {}
     if not isinstance(nutriments, dict):
@@ -1510,13 +1702,13 @@ def build_row(
         recovery_mode=recovery_mode,
     )
     categorie_principale, _ = classify_primary_category(categories_tags, categories_text, rules, stats)
-    manual_primary_category = None
-    if manual_correction is not None:
-        manual_primary_category = clean_text(manual_correction.get("categorie_principale_manual"))
-        if manual_primary_category is not None:
-            manual_primary_category = manual_primary_category.lower()
-            categorie_principale = manual_primary_category
-            stats["manual_primary_category_overrides"] = stats.get("manual_primary_category_overrides", 0) + 1
+    suggested_primary_category = None
+    if category_suggestion is not None:
+        suggested_primary_category = clean_text(category_suggestion.get("suggested_categorie_principale"))
+        if suggested_primary_category is not None:
+            suggested_primary_category = suggested_primary_category.lower()
+            categorie_principale = suggested_primary_category
+            stats["suggested_primary_category_overrides"] = stats.get("suggested_primary_category_overrides", 0) + 1
     if recovery_mode and not categorie_principale:
         categorie_principale = "autres"
     ingredients_text = normalize_ingredients_text(
@@ -1692,8 +1884,8 @@ def init_transform_stats() -> dict[str, int]:
         "primary_category_from_tags": 0,
         "primary_category_from_categories": 0,
         "primary_category_default": 0,
-        "manual_corrections_applied": 0,
-        "manual_primary_category_overrides": 0,
+        "category_suggestions_applied": 0,
+        "suggested_primary_category_overrides": 0,
         "rule_replacements": 0,
         "rule_filtered": 0,
     }

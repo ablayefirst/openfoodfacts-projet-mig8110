@@ -92,11 +92,27 @@ def upload_to_minio(
     if bucket not in existing:
         s3.create_bucket(Bucket=bucket)
 
-    s3.upload_file(str(resolved_local_path), bucket, key)
-    print(f"Uploaded: {resolved_local_path} -> s3://{bucket}/{key} (endpoint={endpoint_url})")
+    # Vérifie si le fichier est déjà présent dans MinIO avec la même taille
+    local_size = resolved_local_path.stat().st_size
+    try:
+        head = s3.head_object(Bucket=bucket, Key=key)
+        remote_size = head["ContentLength"]
+        if remote_size == local_size:
+            print(
+                f"Skipping upload: {resolved_local_path} already in s3://{bucket}/{key} "
+                f"(taille identique: {local_size} octets)"
+            )
+            return {"bucket": bucket, "key": key, "local_path": str(resolved_local_path), "skipped": True}
+    except s3.exceptions.NoSuchKey:
+        pass
+    except Exception:
+        pass
 
-    # utile si on veut pousser via XCom plus tard
-    return {"bucket": bucket, "key": key, "local_path": str(resolved_local_path)}
+    print(f"Upload en cours: {resolved_local_path} ({local_size / 1e9:.2f} GB) -> s3://{bucket}/{key}")
+    s3.upload_file(str(resolved_local_path), bucket, key)
+    print(f"Upload terminé: s3://{bucket}/{key}")
+
+    return {"bucket": bucket, "key": key, "local_path": str(resolved_local_path), "skipped": False}
 
 
 if __name__ == "__main__":
