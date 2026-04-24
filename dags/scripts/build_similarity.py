@@ -1143,6 +1143,14 @@ def build_similarity_recommendations(**_):
         ensure_similarity_table(conn)
         conn.execute(text("DELETE FROM produit_similaire"))
         if not result_df.empty:
+            pk_cols = ["code_produit_source", "code_produit_cible", "type_recommandation"]
+            before = len(result_df)
+            result_df = result_df.sort_values("score_similarite", ascending=False).drop_duplicates(
+                subset=pk_cols, keep="first"
+            )
+            after = len(result_df)
+            if before != after:
+                print(f"Doublons supprimés avant insertion : {before - after} lignes retirées")
             result_df.to_sql("produit_similaire", conn, if_exists="append", index=False)
 
     print("✅ Recommandations similaires et plus saines enregistrées en base")
