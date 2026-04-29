@@ -151,6 +151,53 @@ CREATE TABLE IF NOT EXISTS etl_import_history (
 );
 
 -- =====================================================
+-- REVUE DES PRODUITS REJETES ET SUGGESTIONS DE CATEGORIES
+-- =====================================================
+
+CREATE TABLE IF NOT EXISTS rejected_products_review (
+    rejected_id SERIAL PRIMARY KEY,
+    code_produit TEXT NOT NULL,
+    product_name TEXT,
+    brands TEXT,
+    raw_payload JSONB NOT NULL,
+    corrected_payload JSONB,
+    quality_issues JSONB NOT NULL,
+    source_run_id TEXT,
+    source_task TEXT,
+    import_type TEXT,
+    review_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (review_status IN ('pending', 'suggested', 'validated', 'resolved', 'ignored', 'needs_review')),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+ALTER TABLE rejected_products_review
+ADD COLUMN IF NOT EXISTS corrected_payload JSONB;
+
+ALTER TABLE rejected_products_review
+DROP CONSTRAINT IF EXISTS rejected_products_review_review_status_check;
+
+ALTER TABLE rejected_products_review
+ADD CONSTRAINT rejected_products_review_review_status_check
+CHECK (review_status IN ('pending', 'suggested', 'validated', 'resolved', 'ignored', 'needs_review'));
+
+CREATE TABLE IF NOT EXISTS product_category_suggestions (
+    suggestion_id SERIAL PRIMARY KEY,
+    rejected_id INTEGER NOT NULL REFERENCES rejected_products_review(rejected_id) ON DELETE CASCADE,
+    code_produit TEXT NOT NULL,
+    suggested_categories TEXT,
+    suggested_categories_tags JSONB,
+    suggested_categorie_principale TEXT,
+    suggestion_source TEXT NOT NULL,
+    suggestion_confidence NUMERIC(5,2),
+    decision_status TEXT NOT NULL DEFAULT 'suggested'
+        CHECK (decision_status IN ('suggested', 'validated', 'rejected', 'needs_review', 'applied')),
+    validated_by TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =====================================================
 -- RECOMMANDATIONS PRODUITS
 -- =====================================================
 
@@ -162,10 +209,13 @@ CREATE TABLE IF NOT EXISTS produit_similaire (
     nb_ingredients_communs INTEGER,
     ingredients_communs TEXT,
     methode TEXT,
+    mode_sante TEXT,
     health_score_source NUMERIC,
     health_score_cible NUMERIC,
     PRIMARY KEY (code_produit_source, code_produit_cible, type_recommandation)
 );
+
+ALTER TABLE produit_similaire ADD COLUMN IF NOT EXISTS mode_sante TEXT;
 
 -- =====================================================
 -- INDEX POUR PERFORMANCE (APP WEB + ETL)
@@ -202,6 +252,19 @@ WHERE sugars_100g IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_etl_import_history_imported_at ON etl_import_history(imported_at);
 CREATE INDEX IF NOT EXISTS idx_etl_import_history_type_end_ts ON etl_import_history(import_type, source_end_ts);
+CREATE INDEX IF NOT EXISTS idx_rejected_products_review_code
+ON rejected_products_review(code_produit);
+CREATE INDEX IF NOT EXISTS idx_rejected_products_review_status
+ON rejected_products_review(review_status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_product_category_suggestions_code
+ON product_category_suggestions(code_produit);
+CREATE INDEX IF NOT EXISTS idx_product_category_suggestions_status
+ON product_category_suggestions(decision_status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_product_category_suggestions_rejected_id
+ON product_category_suggestions(rejected_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_product_category_suggestions_active
+ON product_category_suggestions(rejected_id)
+WHERE decision_status IN ('suggested', 'validated', 'needs_review');
 CREATE INDEX IF NOT EXISTS idx_produit_similaire_source_type
 ON produit_similaire(code_produit_source, type_recommandation);
 

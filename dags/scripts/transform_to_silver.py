@@ -12,9 +12,11 @@ from typing import Any
 
 import boto3
 import pandas as pd
+import psycopg2
 import pyarrow as pa
 import pyarrow.parquet as pq
 from botocore.client import Config
+from psycopg2.extras import Json
 
 try:
     import yaml
@@ -168,6 +170,85 @@ def get_s3_client():
         config=Config(signature_version="s3v4"),
         region_name="us-east-1",
     )
+
+
+def get_pg_connection():
+    return psycopg2.connect(
+        host=os.getenv("POSTGRES_HOST", "postgres"),
+        port=os.getenv("POSTGRES_PORT", "5432"),
+        dbname=os.getenv("POSTGRES_DB", "openfood_db"),
+        user=os.getenv("POSTGRES_USER", "postgres"),
+        password=os.getenv("POSTGRES_PASSWORD", "postgres123"),
+    )
+
+
+def ensure_manual_review_tables(conn) -> None:
+    ddl = """
+        CREATE TABLE IF NOT EXISTS rejected_products_review (
+            rejected_id SERIAL PRIMARY KEY,
+            code_produit TEXT NOT NULL,
+            product_name TEXT,
+            brands TEXT,
+            raw_payload JSONB NOT NULL,
+            corrected_payload JSONB,
+            quality_issues JSONB NOT NULL,
+            source_run_id TEXT,
+            source_task TEXT,
+            import_type TEXT,
+            review_status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (review_status IN ('pending', 'suggested', 'validated', 'resolved', 'ignored', 'needs_review')),
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        ALTER TABLE rejected_products_review
+        ADD COLUMN IF NOT EXISTS corrected_payload JSONB;
+
+        ALTER TABLE rejected_products_review
+        DROP CONSTRAINT IF EXISTS rejected_products_review_review_status_check;
+
+        ALTER TABLE rejected_products_review
+        ADD CONSTRAINT rejected_products_review_review_status_check
+        CHECK (review_status IN ('pending', 'suggested', 'validated', 'resolved', 'ignored', 'needs_review'));
+
+        CREATE TABLE IF NOT EXISTS product_category_suggestions (
+            suggestion_id SERIAL PRIMARY KEY,
+            rejected_id INTEGER NOT NULL REFERENCES rejected_products_review(rejected_id) ON DELETE CASCADE,
+            code_produit TEXT NOT NULL,
+            suggested_categories TEXT,
+            suggested_categories_tags JSONB,
+            suggested_categorie_principale TEXT,
+            suggestion_source TEXT NOT NULL,
+            suggestion_confidence NUMERIC(5,2),
+            decision_status TEXT NOT NULL DEFAULT 'suggested'
+                CHECK (decision_status IN ('suggested', 'validated', 'rejected', 'needs_review', 'applied')),
+            validated_by TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_rejected_products_review_code
+        ON rejected_products_review(code_produit);
+
+        CREATE INDEX IF NOT EXISTS idx_rejected_products_review_status
+        ON rejected_products_review(review_status, created_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_product_category_suggestions_code
+        ON product_category_suggestions(code_produit);
+
+        CREATE INDEX IF NOT EXISTS idx_product_category_suggestions_status
+        ON product_category_suggestions(decision_status, created_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_product_category_suggestions_rejected_id
+        ON product_category_suggestions(rejected_id);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_product_category_suggestions_active
+        ON product_category_suggestions(rejected_id)
+        WHERE decision_status IN ('suggested', 'validated', 'needs_review');
+    """
+    with conn.cursor() as cur:
+        cur.execute(ddl)
+    conn.commit()
 
 
 def is_missing(value: Any) -> bool:
@@ -448,7 +529,10 @@ def normalize_categories_fields(
             stats["categories_normalized"] += 1
         return categories_text, normalized_tags
 
-    fallback_sources = [product.get("categories")]
+    fallback_sources = [
+        product.get("categories"),
+        product.get("categories_old"),
+    ]
     if recovery_mode:
         fallback_sources.extend(
             [
@@ -469,7 +553,10 @@ def normalize_categories_fields(
                 stats["categories_normalized"] += 1
             return categories_text, normalized_fallback
 
-    return clean_text(product.get("categories")), []
+    categories_text = clean_text(product.get("categories"))
+    if categories_text is None and tag_values:
+        categories_text = ", ".join(tag_values)
+    return categories_text, []
 
 
 def classify_primary_category(
@@ -881,6 +968,551 @@ def normalize_tag_list(value: Any) -> list[str]:
     return out
 
 
+def infer_import_type() -> str:
+    source_mode = (os.getenv("OPENFOOD_SOURCE_MODE") or "").strip().lower()
+    import_mode = (os.getenv("OPENFOOD_IMPORT_MODE") or "").strip().lower()
+
+    if source_mode == "local":
+        return "local"
+    if import_mode:
+        return import_mode
+    if source_mode:
+        return source_mode
+    return "unknown"
+
+
+def _coerce_manual_tags(value: Any) -> list[str]:
+    if is_missing(value):
+        return []
+
+    raw_items = value
+    if isinstance(value, str):
+        txt = value.strip()
+        parsed = None
+        if txt.startswith("[") and txt.endswith("]"):
+            try:
+                parsed = json.loads(txt)
+            except json.JSONDecodeError:
+                try:
+                    parsed = ast.literal_eval(txt)
+                except (SyntaxError, ValueError):
+                    parsed = None
+        raw_items = parsed if parsed is not None else split_values(value)
+
+    if not isinstance(raw_items, (list, tuple, set)):
+        raw_items = [raw_items]
+
+    out = []
+    seen = set()
+    for item in raw_items:
+        txt = clean_text(item)
+        if txt is None or txt in seen:
+            continue
+        seen.add(txt)
+        out.append(txt)
+    return out
+
+
+def _format_category_from_tag(tag: str) -> str | None:
+    normalized = normalize_tag(tag)
+    if normalized is None:
+        return None
+    return normalized.replace("-", " ").strip()
+
+
+def _build_category_suggestion_from_existing_products(
+    product_name: str | None,
+    brands: str | None,
+) -> dict[str, Any] | None:
+    if product_name is None and brands is None:
+        return None
+
+    normalized_name = canonicalize_text(product_name)
+    tokens = []
+    if normalized_name:
+        tokens = [token for token in normalized_name.split() if len(token) >= 4]
+    tokens = tokens[:4]
+
+    clauses = []
+    params: list[Any] = []
+
+    for token in tokens:
+        clauses.append("LOWER(p.nom_produit) LIKE %s")
+        params.append(f"%{token}%")
+
+    normalized_brand = canonicalize_text(brands)
+    if normalized_brand:
+        clauses.append("LOWER(COALESCE(m.brands, '')) = %s")
+        params.append(normalized_brand)
+
+    if not clauses:
+        return None
+
+    query = f"""
+        SELECT
+            c.categorie,
+            COALESCE(NULLIF(p.categorie_principale, ''), 'autres') AS categorie_principale,
+            COUNT(*) AS hit_count
+        FROM produit p
+        LEFT JOIN marque m ON m.id_marque = p.id_marque
+        JOIN produit_categorie pc ON pc.code_produit = p.code_produit
+        JOIN categorie c ON c.id_categorie = pc.id_categorie
+        WHERE {" OR ".join(clauses)}
+        GROUP BY c.categorie, COALESCE(NULLIF(p.categorie_principale, ''), 'autres')
+        ORDER BY hit_count DESC, c.categorie ASC
+        LIMIT 5
+    """
+
+    conn = get_pg_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return None
+
+    top_category = clean_text(rows[0][0])
+    top_primary = clean_text(rows[0][1]) or "autres"
+    top_hits = int(rows[0][2] or 0)
+    if top_category is None:
+        return None
+
+    return {
+        "suggested_categories": top_category,
+        "suggested_categories_tags": [f"en:{normalize_tag(top_category) or top_category.replace(' ', '-')}"],
+        "suggested_categorie_principale": top_primary,
+        "suggestion_source": "catalog_similarity",
+        "suggestion_confidence": round(min(0.4 + 0.1 * top_hits, 0.89), 2),
+    }
+
+
+def generate_category_suggestion(
+    product: dict[str, Any],
+    rules: dict[str, Any],
+) -> dict[str, Any] | None:
+    compared_to_category = clean_text(product.get("compared_to_category"))
+    if compared_to_category is not None:
+        pretty = _format_category_from_tag(compared_to_category)
+        if pretty:
+            primary, _ = classify_primary_category(
+                [normalize_tag(compared_to_category) or pretty.replace(" ", "-")],
+                pretty,
+                rules,
+                stats={
+                    "primary_category_assigned": 0,
+                    "primary_category_from_tags": 0,
+                    "primary_category_from_categories": 0,
+                    "primary_category_default": 0,
+                },
+            )
+            return {
+                "suggested_categories": pretty,
+                "suggested_categories_tags": [compared_to_category],
+                "suggested_categorie_principale": primary,
+                "suggestion_source": "compared_to_category",
+                "suggestion_confidence": 0.95,
+            }
+
+    product_name = pick_product_name(product, recovery_mode=True)
+    brands = normalize_brands(product, recovery_mode=True)
+    return _build_category_suggestion_from_existing_products(product_name, brands)
+
+
+def load_validated_category_suggestions() -> dict[str, dict[str, Any]]:
+    query = """
+        SELECT
+            suggestion_id,
+            rejected_id,
+            code_produit,
+            suggested_categories,
+            suggested_categories_tags,
+            suggested_categorie_principale,
+            suggestion_source,
+            suggestion_confidence,
+            decision_status,
+            validated_by,
+            created_at,
+            updated_at
+        FROM product_category_suggestions
+        WHERE decision_status IN ('validated', 'applied')
+        ORDER BY updated_at DESC, suggestion_id DESC
+    """
+
+    suggestions: dict[str, dict[str, Any]] = {}
+    conn = get_pg_connection()
+    try:
+        ensure_manual_review_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute(query)
+            for row in cur.fetchall():
+                code = normalize_code(row[2])
+                if code is None or code in suggestions:
+                    continue
+                suggestions[code] = {
+                    "suggestion_id": row[0],
+                    "rejected_id": row[1],
+                    "code_produit": code,
+                    "suggested_categories": clean_text(row[3]),
+                    "suggested_categories_tags": _coerce_manual_tags(row[4]),
+                    "suggested_categorie_principale": clean_text(row[5]),
+                    "suggestion_source": clean_text(row[6]),
+                    "suggestion_confidence": row[7],
+                    "decision_status": clean_text(row[8]),
+                    "validated_by": clean_text(row[9]),
+                    "created_at": row[10],
+                    "updated_at": row[11],
+                }
+    finally:
+        conn.close()
+
+    return suggestions
+
+
+def apply_validated_category_suggestion(
+    product: dict[str, Any],
+    suggestion: dict[str, Any] | None,
+    stats: dict[str, int] | None = None,
+) -> tuple[dict[str, Any], bool]:
+    if suggestion is None:
+        return product, False
+
+    merged = dict(product)
+    applied = False
+
+    suggested_categories = clean_text(suggestion.get("suggested_categories"))
+    if suggested_categories is not None:
+        merged["categories"] = suggested_categories
+        applied = True
+
+    suggested_tags = _coerce_manual_tags(suggestion.get("suggested_categories_tags"))
+    if suggested_tags:
+        merged["categories_tags"] = suggested_tags
+        applied = True
+
+    if clean_text(suggestion.get("suggested_categorie_principale")) is not None:
+        applied = True
+
+    if applied and stats is not None:
+        stats["category_suggestions_applied"] = stats.get("category_suggestions_applied", 0) + 1
+
+    return merged, applied
+
+
+def load_validated_product_corrections() -> dict[str, dict[str, Any]]:
+    query = """
+        SELECT code_produit, corrected_payload
+        FROM rejected_products_review
+        WHERE review_status IN ('validated', 'resolved')
+          AND corrected_payload IS NOT NULL
+        ORDER BY updated_at DESC, rejected_id DESC
+    """
+
+    corrections: dict[str, dict[str, Any]] = {}
+    conn = get_pg_connection()
+    try:
+        ensure_manual_review_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute(query)
+            for code_value, corrected_payload in cur.fetchall():
+                code = normalize_code(code_value)
+                if code is None or code in corrections or not isinstance(corrected_payload, dict):
+                    continue
+                corrections[code] = corrected_payload
+    finally:
+        conn.close()
+
+    return corrections
+
+
+def load_validated_manual_product_submissions() -> dict[str, dict[str, Any]]:
+    query = """
+        SELECT code_produit, corrected_payload
+        FROM rejected_products_review
+        WHERE review_status IN ('validated', 'resolved')
+          AND source_task IN ('streamlit_manual_add', 'streamlit_product_edit')
+          AND corrected_payload IS NOT NULL
+        ORDER BY updated_at DESC, rejected_id DESC
+    """
+
+    submissions: dict[str, dict[str, Any]] = {}
+    conn = get_pg_connection()
+    try:
+        ensure_manual_review_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute(query)
+            for code_value, corrected_payload in cur.fetchall():
+                code = normalize_code(code_value)
+                if code is None or code in submissions or not isinstance(corrected_payload, dict):
+                    continue
+                submissions[code] = corrected_payload
+    finally:
+        conn.close()
+
+    return submissions
+
+
+def apply_validated_product_correction(
+    product: dict[str, Any],
+    correction: dict[str, Any] | None,
+    stats: dict[str, int] | None = None,
+) -> tuple[dict[str, Any], bool]:
+    if not correction:
+        return product, False
+
+    merged = dict(product)
+    merged.update(correction)
+    merged["_manual_review_applied"] = True
+    if stats is not None:
+        stats["manual_product_corrections_applied"] = stats.get("manual_product_corrections_applied", 0) + 1
+    return merged, True
+
+
+def upsert_category_suggestion(
+    cur,
+    *,
+    rejected_id: int,
+    code_produit: str,
+    suggestion: dict[str, Any] | None,
+) -> bool:
+    if suggestion is None:
+        return False
+
+    select_sql = """
+        SELECT suggestion_id, decision_status
+        FROM product_category_suggestions
+        WHERE rejected_id = %s
+        ORDER BY suggestion_id DESC
+        LIMIT 1
+    """
+    update_sql = """
+        UPDATE product_category_suggestions
+        SET suggested_categories = %s,
+            suggested_categories_tags = %s,
+            suggested_categorie_principale = %s,
+            suggestion_source = %s,
+            suggestion_confidence = %s,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE suggestion_id = %s
+    """
+    insert_sql = """
+        INSERT INTO product_category_suggestions (
+            rejected_id,
+            code_produit,
+            suggested_categories,
+            suggested_categories_tags,
+            suggested_categorie_principale,
+            suggestion_source,
+            suggestion_confidence,
+            decision_status
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 'suggested')
+    """
+
+    cur.execute(select_sql, (rejected_id,))
+    existing = cur.fetchone()
+    if existing:
+        existing_status = clean_text(existing[1]) or "suggested"
+        if existing_status in {"validated", "applied", "needs_review"}:
+            return True
+        cur.execute(
+            update_sql,
+            (
+                clean_text(suggestion.get("suggested_categories")),
+                Json(_coerce_manual_tags(suggestion.get("suggested_categories_tags")) or None),
+                clean_text(suggestion.get("suggested_categorie_principale")),
+                clean_text(suggestion.get("suggestion_source")) or "unknown",
+                suggestion.get("suggestion_confidence"),
+                existing[0],
+            ),
+        )
+        return True
+
+    cur.execute(
+        insert_sql,
+        (
+            rejected_id,
+            code_produit,
+            clean_text(suggestion.get("suggested_categories")),
+            Json(_coerce_manual_tags(suggestion.get("suggested_categories_tags")) or None),
+            clean_text(suggestion.get("suggested_categorie_principale")),
+            clean_text(suggestion.get("suggestion_source")) or "unknown",
+            suggestion.get("suggestion_confidence"),
+        ),
+    )
+    return True
+
+
+def upsert_rejected_product_reviews(
+    rejected_products: list[dict[str, Any]],
+    *,
+    source_task: str,
+    source_run_id: str | None = None,
+    import_type: str | None = None,
+    rules: dict[str, Any] | None = None,
+) -> None:
+    if not rejected_products:
+        return
+
+    import_type = import_type or infer_import_type()
+    select_sql = """
+        SELECT rejected_id, review_status
+        FROM rejected_products_review
+        WHERE code_produit = %s
+        ORDER BY rejected_id DESC
+        LIMIT 1
+    """
+    update_sql = """
+        UPDATE rejected_products_review
+        SET product_name = %s,
+            brands = %s,
+            raw_payload = %s,
+            quality_issues = %s,
+            source_run_id = %s,
+            source_task = %s,
+            import_type = %s,
+            review_status = %s,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE rejected_id = %s
+    """
+    insert_sql = """
+        INSERT INTO rejected_products_review (
+            code_produit,
+            product_name,
+            brands,
+            raw_payload,
+            quality_issues,
+            source_run_id,
+            source_task,
+            import_type,
+            review_status
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING rejected_id
+    """
+
+    conn = get_pg_connection()
+    try:
+        ensure_manual_review_tables(conn)
+        with conn.cursor() as cur:
+            for rejected in rejected_products:
+                code = normalize_code(rejected.get("code_produit"))
+                if code is None:
+                    continue
+
+                target_status = clean_text(rejected.get("review_status")) or "pending"
+                product_name = clean_text(rejected.get("product_name"))
+                brands = clean_text(rejected.get("brands"))
+                raw_payload = rejected.get("raw_payload") or {}
+                quality_issues = rejected.get("quality_issues") or []
+                suggestion = generate_category_suggestion(raw_payload, rules or DEFAULT_NORMALIZATION_RULES)
+                if target_status == "pending" and suggestion is not None:
+                    target_status = "suggested"
+
+                cur.execute(select_sql, (code,))
+                existing = cur.fetchone()
+                if existing and existing[1] != "resolved":
+                    existing_status = existing[1]
+                    if existing_status in {"ignored", "validated"}:
+                        next_status = existing_status
+                    else:
+                        next_status = target_status
+                    cur.execute(
+                        update_sql,
+                        (
+                            product_name,
+                            brands,
+                            Json(raw_payload),
+                            Json(quality_issues),
+                            source_run_id,
+                            source_task,
+                            import_type,
+                            next_status,
+                            existing[0],
+                        ),
+                    )
+                    upsert_category_suggestion(
+                        cur,
+                        rejected_id=existing[0],
+                        code_produit=code,
+                        suggestion=suggestion,
+                    )
+                    continue
+
+                cur.execute(
+                    insert_sql,
+                    (
+                        code,
+                        product_name,
+                        brands,
+                        Json(raw_payload),
+                        Json(quality_issues),
+                        source_run_id,
+                        source_task,
+                        import_type,
+                        target_status,
+                    ),
+                )
+                inserted_rejected_id = cur.fetchone()[0]
+                upsert_category_suggestion(
+                    cur,
+                    rejected_id=inserted_rejected_id,
+                    code_produit=code,
+                    suggestion=suggestion,
+                )
+
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def resolve_rejected_product_reviews(codes: set[str]) -> None:
+    clean_codes = sorted({normalize_code(code) for code in codes if normalize_code(code) is not None})
+    if not clean_codes:
+        return
+
+    query = """
+        UPDATE rejected_products_review
+        SET review_status = 'resolved',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE code_produit = ANY(%s)
+          AND review_status <> 'resolved'
+    """
+
+    conn = get_pg_connection()
+    try:
+        ensure_manual_review_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute(query, (clean_codes,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_category_suggestion_status(codes: set[str], status: str) -> None:
+    clean_codes = sorted({normalize_code(code) for code in codes if normalize_code(code) is not None})
+    if not clean_codes:
+        return
+
+    query = """
+        UPDATE product_category_suggestions
+        SET decision_status = %s,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE code_produit = ANY(%s)
+    """
+
+    conn = get_pg_connection()
+    try:
+        ensure_manual_review_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute(query, (status, clean_codes))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def format_amount(value: float) -> str:
     return f"{value:.3f}".rstrip("0").rstrip(".")
 
@@ -1090,6 +1722,7 @@ def build_row(
     stats: dict[str, int],
     rules: dict[str, Any],
     recovery_mode: bool = False,
+    category_suggestion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     nutriments = product.get("nutriments") or {}
     if not isinstance(nutriments, dict):
@@ -1145,6 +1778,15 @@ def build_row(
         recovery_mode=recovery_mode,
     )
     categorie_principale, _ = classify_primary_category(categories_tags, categories_text, rules, stats)
+    suggested_primary_category = None
+    if category_suggestion is not None:
+        suggested_primary_category = clean_text(category_suggestion.get("suggested_categorie_principale"))
+        if suggested_primary_category is not None:
+            suggested_primary_category = suggested_primary_category.lower()
+            categorie_principale = suggested_primary_category
+            stats["suggested_primary_category_overrides"] = stats.get("suggested_primary_category_overrides", 0) + 1
+    if recovery_mode and not categorie_principale:
+        categorie_principale = "autres"
     ingredients_text = normalize_ingredients_text(
         product,
         rules,
@@ -1202,7 +1844,7 @@ def build_row(
         "image_url": image_url,
         "image_small_url": image_small_url,
         "image_nutrition_url": image_nutrition_url,
-}
+    }
 
 
 def quantity_is_final(row: dict[str, Any]) -> bool:
@@ -1250,7 +1892,7 @@ def salt_sodium_is_final(row: dict[str, Any]) -> bool:
     return salt == norm_salt and sodium == norm_sodium
 
 
-def evaluate_final_contract(row: dict[str, Any]) -> list[str]:
+def evaluate_final_contract(row: dict[str, Any], recovery_mode: bool = False) -> list[str]:
     issues = []
 
     if normalize_code(row.get("code")) is None:
@@ -1259,16 +1901,18 @@ def evaluate_final_contract(row: dict[str, Any]) -> list[str]:
         issues.append("missing_product_name")
     if clean_text(row.get("categories")) is None:
         issues.append("missing_categories")
-    if clean_text(row.get("categorie_principale")) is None:
-        issues.append("missing_categorie_principale")
-    if not quantity_is_final(row):
-        issues.append("quantity_not_standardized")
-    if not nutriscore_is_final(row):
-        issues.append("nutriscore_inconsistent")
-    if not energy_is_final(row):
-        issues.append("energy_inconsistent")
-    if not salt_sodium_is_final(row):
-        issues.append("salt_sodium_inconsistent")
+
+    if not recovery_mode:
+        if clean_text(row.get("categorie_principale")) is None:
+            issues.append("missing_categorie_principale")
+        if not quantity_is_final(row):
+            issues.append("quantity_not_standardized")
+        if not nutriscore_is_final(row):
+            issues.append("nutriscore_inconsistent")
+        if not energy_is_final(row):
+            issues.append("energy_inconsistent")
+        if not salt_sodium_is_final(row):
+            issues.append("salt_sodium_inconsistent")
 
     return issues
 
@@ -1316,6 +1960,8 @@ def init_transform_stats() -> dict[str, int]:
         "primary_category_from_tags": 0,
         "primary_category_from_categories": 0,
         "primary_category_default": 0,
+        "category_suggestions_applied": 0,
+        "suggested_primary_category_overrides": 0,
         "rule_replacements": 0,
         "rule_filtered": 0,
     }

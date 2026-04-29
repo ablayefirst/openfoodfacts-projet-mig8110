@@ -775,8 +775,23 @@ def load_parquet_to_postgres(
                 if not has_batches:
                     print("No rows to load from Silver Parquet.")
 
-                if import_type == "full":
+                if import_type in ("full", "local"):
                     stats["products_deleted"] = delete_missing_products_from_full_snapshot(cur, imported_codes)
+
+                if imported_codes:
+                    cur.execute(
+                        """
+                        UPDATE rejected_products_review
+                        SET review_status = 'resolved', updated_at = NOW()
+                        WHERE code_produit = ANY(%s)
+                          AND review_status NOT IN ('resolved', 'ignored')
+                        """,
+                        (list(imported_codes),),
+                    )
+                    resolved_count = cur.rowcount
+                    if resolved_count:
+                        print(f"Marked {resolved_count} previously rejected products as resolved.")
+                    stats["rejected_resolved"] = resolved_count
 
                 record_import_history(
                     cur,
@@ -797,7 +812,8 @@ def load_parquet_to_postgres(
         f"rows_skipped_missing_keys={stats['rows_skipped_missing_keys']}, "
         f"products_inserted={stats['products_inserted']}, products_updated={stats['products_updated']}, "
         f"nutrition_inserted={stats['nutrition_inserted']}, nutrition_updated={stats['nutrition_updated']}, "
-        f"links_inserted={stats['links_inserted']}, products_deleted={stats['products_deleted']}"
+        f"links_inserted={stats['links_inserted']}, products_deleted={stats['products_deleted']}, "
+        f"rejected_resolved={stats.get('rejected_resolved', 0)}"
     )
     return stats
 
