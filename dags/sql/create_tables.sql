@@ -85,8 +85,28 @@ CREATE TABLE IF NOT EXISTS produit_categorie (
 CREATE TABLE IF NOT EXISTS synonyme_ingredient (
     id_synonyme SERIAL PRIMARY KEY,
     nom_synonyme TEXT,
-    id_ingredient INT REFERENCES ingredient(id_ingredient)
+    id_ingredient INT REFERENCES ingredient(id_ingredient),
+    langue TEXT,
+    source TEXT DEFAULT 'manual',
+    relation_type TEXT DEFAULT 'exact',
+    confidence NUMERIC(5,2),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE synonyme_ingredient
+ADD COLUMN IF NOT EXISTS langue TEXT;
+
+ALTER TABLE synonyme_ingredient
+ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual';
+
+ALTER TABLE synonyme_ingredient
+ADD COLUMN IF NOT EXISTS relation_type TEXT DEFAULT 'exact';
+
+ALTER TABLE synonyme_ingredient
+ADD COLUMN IF NOT EXISTS confidence NUMERIC(5,2);
+
+ALTER TABLE synonyme_ingredient
+ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;
 
 
 CREATE TABLE IF NOT EXISTS produit_ingredient (
@@ -247,3 +267,37 @@ ON product_category_suggestions(rejected_id)
 WHERE decision_status IN ('suggested', 'validated', 'needs_review');
 CREATE INDEX IF NOT EXISTS idx_produit_similaire_source_type
 ON produit_similaire(code_produit_source, type_recommandation);
+
+CREATE INDEX IF NOT EXISTS idx_synonyme_ingredient_id_ingredient
+ON synonyme_ingredient(id_ingredient);
+
+CREATE INDEX IF NOT EXISTS idx_synonyme_ingredient_nom_trgm
+ON synonyme_ingredient USING gin (LOWER(COALESCE(nom_synonyme, '')) gin_trgm_ops);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_synonyme_ingredient_nom_unique
+ON synonyme_ingredient(LOWER(TRIM(nom_synonyme)))
+WHERE nom_synonyme IS NOT NULL AND TRIM(nom_synonyme) <> '';
+
+CREATE OR REPLACE VIEW ingredient_lookup AS
+SELECT
+    i.id_ingredient,
+    i.ingredients_nom AS nom_recherche,
+    LOWER(TRIM(i.ingredients_nom)) AS nom_recherche_normalise,
+    i.ingredients_nom AS nom_canonique,
+    'ingredient' AS source,
+    'exact' AS relation_type
+FROM ingredient i
+WHERE i.ingredients_nom IS NOT NULL AND TRIM(i.ingredients_nom) <> ''
+
+UNION ALL
+
+SELECT
+    s.id_ingredient,
+    s.nom_synonyme AS nom_recherche,
+    LOWER(TRIM(s.nom_synonyme)) AS nom_recherche_normalise,
+    i.ingredients_nom AS nom_canonique,
+    COALESCE(NULLIF(TRIM(s.source), ''), 'synonyme') AS source,
+    COALESCE(NULLIF(TRIM(s.relation_type), ''), 'exact') AS relation_type
+FROM synonyme_ingredient s
+JOIN ingredient i ON i.id_ingredient = s.id_ingredient
+WHERE s.nom_synonyme IS NOT NULL AND TRIM(s.nom_synonyme) <> '';
