@@ -159,4 +159,3 @@ for index, (_, row) in enumerate(fav_df.iterrows()):
                 st.switch_page("pages/01_detail_produit.py")
             except Exception:
                 st.info("Veuillez ouvrir la page 'Détail du produit' via le menu latéral.")
-
