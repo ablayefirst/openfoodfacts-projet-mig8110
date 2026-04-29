@@ -22,7 +22,7 @@ render_top_menu("Dashboard")
 render_page_hero(
     kicker="Analyse produit",
     title="Detail du produit",
-    subtitle="Consultez la fiche complete, les donnees nutritionnelles et les alternatives recommandees.",
+    subtitle="Un resume clair du produit, avec les alternatives plus saines accessibles en un clic.",
 )
 
 conn = get_connection()
@@ -56,49 +56,42 @@ if "detail_similarity_mode_label" not in st.session_state:
 if "detail_healthier_mode_label" not in st.session_state:
     st.session_state["detail_healthier_mode_label"] = "1 - Profil nutritionnel"
 
-st.markdown("### ⚙️ Paramètres de recommandation")
+with st.expander("Options avancees de recommandation", expanded=False):
+    param_col1, param_col2 = st.columns(2)
 
-param_col1, param_col2 = st.columns(2)
+    with param_col1:
+        selected_similarity_label = st.selectbox(
+            "Mode des produits similaires",
+            options=list(SIMILARITY_MODE_OPTIONS.keys()),
+            index=list(SIMILARITY_MODE_OPTIONS.keys()).index(
+                st.session_state["detail_similarity_mode_label"]
+            ),
+            help="Choisissez comment les produits similaires sont recherchés."
+        )
 
-with param_col1:
-    selected_similarity_label = st.selectbox(
-        "Mode des produits similaires",
-        options=list(SIMILARITY_MODE_OPTIONS.keys()),
-        index=list(SIMILARITY_MODE_OPTIONS.keys()).index(
-            st.session_state["detail_similarity_mode_label"]
-        ),
-        help="Choisissez comment les produits similaires sont recherchés."
-    )
+    with param_col2:
+        selected_healthier_label = st.selectbox(
+            "Mode des alternatives plus saines",
+            options=list(HEALTHIER_MODE_OPTIONS.keys()),
+            index=list(HEALTHIER_MODE_OPTIONS.keys()).index(
+                st.session_state["detail_healthier_mode_label"]
+            ),
+            help="Choisissez comment les alternatives plus saines sont recherchées."
+        )
 
-with param_col2:
-    selected_healthier_label = st.selectbox(
-        "Mode des alternatives plus saines",
-        options=list(HEALTHIER_MODE_OPTIONS.keys()),
-        index=list(HEALTHIER_MODE_OPTIONS.keys()).index(
-            st.session_state["detail_healthier_mode_label"]
-        ),
-        help="Choisissez comment les alternatives plus saines sont recherchées."
-    )
+    choice_col1, choice_col2 = st.columns(2)
+
+    with choice_col1:
+        show_similarity = st.checkbox("Produits similaires", value=False)
+
+    with choice_col2:
+        show_healthier = st.checkbox("Alternatives plus saines", value=True)
 
 st.session_state["detail_similarity_mode_label"] = selected_similarity_label
 st.session_state["detail_healthier_mode_label"] = selected_healthier_label
 
 selected_similarity_method = SIMILARITY_MODE_OPTIONS[selected_similarity_label]
 selected_healthier_method = HEALTHIER_MODE_OPTIONS[selected_healthier_label]
-
-# ==============================
-# CHOIX TYPE RECOMMANDATION
-# ==============================
-
-st.markdown("### 🔘 Type de recommandation")
-
-choice_col1, choice_col2 = st.columns(2)
-
-with choice_col1:
-    show_similarity = st.checkbox("Produits similaires", value=True)
-
-with choice_col2:
-    show_healthier = st.checkbox("Alternatives plus saines", value=True)
 
 show_recommendations_warning = not show_similarity and not show_healthier
 
@@ -130,7 +123,24 @@ if query_code is not None:
 
 if code is None:
     st.warning("Aucun code produit trouvé dans la session ou dans l’URL.")
-    st.info("Retournez au dashboard et cliquez sur le bouton 'Détails' d'un produit.")
+    missing_col1, missing_col2 = st.columns([0.72, 0.28])
+    with missing_col1:
+        missing_code = st.text_input(
+            "Code produit / code-barres",
+            placeholder="Ex. 737628064502",
+        )
+    with missing_col2:
+        st.markdown("<div style='height:1.75rem;'></div>", unsafe_allow_html=True)
+        if st.button("Ouvrir ce code", use_container_width=True):
+            cleaned_code = missing_code.strip()
+            if cleaned_code:
+                st.session_state["selected_code"] = cleaned_code
+                try:
+                    st.query_params["code"] = cleaned_code
+                except AttributeError:
+                    st.experimental_set_query_params(code=cleaned_code)
+                st.rerun()
+    st.info("Vous pouvez aussi retourner au dashboard et cliquer sur le bouton 'Détails' d'un produit.")
     st.stop()
 
 st.session_state.pop("detail_reco_error", None)
@@ -149,6 +159,90 @@ if str(current_qp) != str(code):
         st.query_params["code"] = str(code)
     except AttributeError:
         st.experimental_set_query_params(code=str(code))
+
+PRODUCT_SEARCH_QUERY = """
+SELECT
+    p.code_produit AS code,
+    p.nom_produit AS product_name,
+    COALESCE(m.brands, 'Marque non specifiee') AS brand,
+    COALESCE(p.categorie_principale, 'Categorie non specifiee') AS category,
+    COALESCE(p.nutrition_grade, 'N/A') AS nutrition_grade,
+    COALESCE(CAST(p.nova_group AS TEXT), 'N/A') AS nova_group
+FROM produit p
+LEFT JOIN marque m ON p.id_marque = m.id_marque
+WHERE
+    CAST(p.code_produit AS TEXT) ILIKE %s
+    OR p.nom_produit ILIKE %s
+    OR m.brands ILIKE %s
+ORDER BY
+    CASE
+        WHEN CAST(p.code_produit AS TEXT) = %s THEN 0
+        WHEN CAST(p.code_produit AS TEXT) ILIKE %s THEN 1
+        WHEN p.nom_produit ILIKE %s THEN 2
+        ELSE 3
+    END,
+    p.nom_produit ASC NULLS LAST
+LIMIT 15
+"""
+
+
+def open_product(product_code) -> None:
+    cleaned_code = str(product_code or "").strip()
+    if not cleaned_code:
+        return
+    st.session_state["selected_code"] = cleaned_code
+    try:
+        st.query_params["code"] = cleaned_code
+    except AttributeError:
+        st.experimental_set_query_params(code=cleaned_code)
+    st.rerun()
+
+
+with st.expander("Changer de produit", expanded=False):
+    product_lookup = st.text_input(
+        "Rechercher par nom, marque ou code produit",
+        value=st.session_state.get("detail_product_lookup", ""),
+        placeholder="Ex. olive, nutella, 737628, 0009300187084",
+    )
+    st.session_state["detail_product_lookup"] = product_lookup
+
+    lookup_clean = product_lookup.strip()
+    if lookup_clean:
+        lookup_like = f"%{lookup_clean}%"
+        lookup_prefix = f"{lookup_clean}%"
+        search_df = pd.read_sql(
+            PRODUCT_SEARCH_QUERY,
+            conn,
+            params=(
+                lookup_like,
+                lookup_like,
+                lookup_like,
+                lookup_clean,
+                lookup_prefix,
+                lookup_prefix,
+            ),
+        )
+
+        if search_df.empty:
+            st.warning("Aucun produit trouve pour cette recherche.")
+        else:
+            selected_idx = st.selectbox(
+                "Produits trouves",
+                options=list(range(len(search_df))),
+                format_func=lambda idx: (
+                    f"{search_df.iloc[idx]['product_name'] or 'Produit sans nom'} "
+                    f"- {search_df.iloc[idx]['brand']} "
+                    f"({search_df.iloc[idx]['code']})"
+                ),
+            )
+            selected_product = search_df.iloc[selected_idx]
+            st.caption(
+                f"Categorie: {selected_product['category']} | "
+                f"NutriScore: {str(selected_product['nutrition_grade']).upper()} | "
+                f"NOVA: {selected_product['nova_group']}"
+            )
+            if st.button("Ouvrir le produit selectionne", use_container_width=True):
+                open_product(selected_product["code"])
 
 # ==============================
 # REQUÊTES SQL
@@ -221,10 +315,17 @@ SELECT
     p.image_small_url,
     p.nutrition_grade,
     p.nova_group,
-    p.categorie_principale
+    p.categorie_principale,
+    v.sugars_100g,
+    v.salt_100g,
+    v.saturated_fat_100g,
+    v.fiber_100g,
+    v.proteins_100g
 FROM produit_similaire ps
 JOIN produit p
     ON ps.code_produit_cible = p.code_produit
+LEFT JOIN valeurs_nutritionnelles v
+    ON p.code_produit = v.code_produit
 WHERE ps.code_produit_source = %s
   AND ps.type_recommandation = 'similaire'
   AND ps.methode = %s
@@ -248,10 +349,17 @@ SELECT
     p.image_small_url,
     p.nutrition_grade,
     p.nova_group,
-    p.categorie_principale
+    p.categorie_principale,
+    v.sugars_100g,
+    v.salt_100g,
+    v.saturated_fat_100g,
+    v.fiber_100g,
+    v.proteins_100g
 FROM produit_similaire ps
 JOIN produit p
     ON ps.code_produit_cible = p.code_produit
+LEFT JOIN valeurs_nutritionnelles v
+    ON p.code_produit = v.code_produit
 WHERE ps.code_produit_source = %s
   AND ps.type_recommandation = 'plus_saine'
   AND ps.methode = %s
@@ -270,10 +378,15 @@ RECOMMENDATION_COLUMNS = [
     "nutrition_grade",
     "nova_group",
     "categorie_principale",
+    "sugars_100g",
+    "salt_100g",
+    "saturated_fat_100g",
+    "fiber_100g",
+    "proteins_100g",
 ]
 
 
-def read_optional_recommendations(query: str, product_code: str) -> pd.DataFrame:
+def read_optional_recommendations(query: str, product_code: str, method: str) -> pd.DataFrame:
     """Load optional recommendation data without breaking the detail page.
 
     The recommendations table is populated by a separate process and may not
@@ -282,7 +395,7 @@ def read_optional_recommendations(query: str, product_code: str) -> pd.DataFrame
     """
 
     try:
-        return pd.read_sql(query, conn, params=(product_code,))
+        return pd.read_sql(query, conn, params=(product_code, method))
     except Exception as exc:
         st.session_state["detail_reco_error"] = str(exc)
         return pd.DataFrame(columns=RECOMMENDATION_COLUMNS)
@@ -295,19 +408,8 @@ if detail_df.empty:
 
 row = detail_df.iloc[0]
 
-similar_df = pd.read_sql(
-    SIMILAR_PRODUCTS_QUERY,
-    conn,
-    params=(code, selected_similarity_method)
-)
-
-healthier_df = pd.read_sql(
-    HEALTHIER_PRODUCTS_QUERY,
-    conn,
-    params=(code, selected_healthier_method)
-)
-similar_df = read_optional_recommendations(SIMILAR_PRODUCTS_QUERY, code)
-healthier_df = read_optional_recommendations(HEALTHIER_PRODUCTS_QUERY, code)
+similar_df = read_optional_recommendations(SIMILAR_PRODUCTS_QUERY, code, selected_similarity_method)
+healthier_df = read_optional_recommendations(HEALTHIER_PRODUCTS_QUERY, code, selected_healthier_method)
 
 # ==============================
 # FICHE PRODUIT (AFFICHEE AVANT ANALYSE)
@@ -408,8 +510,8 @@ st.markdown(
         justify-content: center;
         overflow: hidden;
         height: 100%;
-        max-height: 790px;
-        min-height: 720px;
+        max-height: 460px;
+        min-height: 360px;
     }
     .product-image-frame img {
         width: 100%;
@@ -490,10 +592,137 @@ st.markdown(
         font-size: 0.92rem;
     }
     .exp-list li { margin: 0.22rem 0; }
+    .score-breakdown {
+        list-style: none;
+        margin: 0.65rem 0 0;
+        padding: 0;
+    }
+    .score-breakdown li {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.7rem;
+        border-top: 1px solid rgba(148,163,184,0.22);
+        padding: 0.38rem 0;
+        color: #334155;
+        font-size: 0.88rem;
+    }
+    .delta-positive { color: #15803d; font-weight: 800; }
+    .delta-negative { color: #b91c1c; font-weight: 800; }
+    .delta-neutral { color: #64748b; font-weight: 800; }
+    .badge-wrap {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        margin: 0.35rem 0 0.55rem;
+    }
+    .detail-badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.25rem 0.55rem;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-weight: 800;
+        border: 1px solid transparent;
+    }
+    .badge-allergen { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
+    .badge-label { background: #dcfce7; color: #166534; border-color: #bbf7d0; }
+    .replace-card {
+        border: 1px solid rgba(15,118,110,0.22);
+        border-radius: 14px;
+        padding: 0.9rem 1rem;
+        margin-bottom: 0.8rem;
+        background: #ffffff;
+        box-shadow: 0 5px 14px rgba(15,23,42,0.05);
+    }
+    .replace-title {
+        margin: 0 0 0.25rem;
+        color: #0f172a;
+        font-size: 1.05rem;
+        font-weight: 800;
+    }
+    .reason-list {
+        margin: 0.45rem 0;
+        padding-left: 1rem;
+        color: #334155;
+        font-size: 0.9rem;
+    }
+    .reason-list li { margin: 0.16rem 0; }
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+
+def split_display_values(value: str, limit: int = 8) -> list[str]:
+    if pd.isna(value) or str(value).strip() in ("", "Non spécifiés", "Non spécifiée"):
+        return []
+    return [item.strip() for item in str(value).split(",") if item.strip()][:limit]
+
+
+def render_detail_badges(values: list[str], badge_class: str) -> str:
+    if not values:
+        return "<span style='color:#64748b;font-size:0.88rem;'>Non spécifiés</span>"
+    return (
+        "<div class='badge-wrap'>"
+        + "".join(
+            f"<span class='detail-badge {badge_class}'>{escape(value[:42])}</span>"
+            for value in values
+        )
+        + "</div>"
+    )
+
+
+def safe_float(value):
+    try:
+        if value is None or pd.isna(value):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def grade_rank(grade) -> int | None:
+    return {"A": 5, "B": 4, "C": 3, "D": 2, "E": 1}.get(str(grade).strip().upper())
+
+
+def build_replacement_reasons(source_row, candidate_row) -> list[str]:
+    reasons = []
+
+    comparisons = [
+        ("sugars_100g", "moins de sucre", "g/100g", False),
+        ("salt_100g", "moins de sel", "g/100g", False),
+        ("saturated_fat_100g", "moins de graisses saturées", "g/100g", False),
+        ("fiber_100g", "plus de fibres", "g/100g", True),
+        ("proteins_100g", "plus de protéines", "g/100g", True),
+    ]
+    for key, label, unit, higher_is_better in comparisons:
+        source_value = safe_float(source_row.get(key))
+        candidate_value = safe_float(candidate_row.get(key))
+        if source_value is None or candidate_value is None:
+            continue
+        improvement = candidate_value - source_value if higher_is_better else source_value - candidate_value
+        if improvement > 0:
+            reasons.append(
+                f"{label}: {source_value:.1f} -> {candidate_value:.1f} {unit}"
+            )
+
+    source_grade = grade_rank(source_row.get("nutrition_grade"))
+    candidate_grade = grade_rank(candidate_row.get("nutrition_grade"))
+    if source_grade is not None and candidate_grade is not None and candidate_grade > source_grade:
+        reasons.append(
+            f"meilleur NutriScore: {str(source_row.get('nutrition_grade')).upper()} -> {str(candidate_row.get('nutrition_grade')).upper()}"
+        )
+
+    source_nova = safe_float(source_row.get("nova_group"))
+    candidate_nova = safe_float(candidate_row.get("nova_group"))
+    if source_nova is not None and candidate_nova is not None and candidate_nova < source_nova:
+        reasons.append(f"NOVA plus faible: {int(source_nova)} -> {int(candidate_nova)}")
+
+    if not reasons:
+        reasons.append("profil global plus favorable selon le score santé calculé")
+    return reasons[:5]
+
 
 product_name = row.get("product_name", "Produit sans nom")
 product_code = row.get("code", "N/A")
@@ -502,6 +731,8 @@ quantite = row.get("quantite", "Non spécifiée")
 category_main = row.get("categorie_principale", "autres")
 categories = row.get("categories", "Non spécifiée")
 countries = row.get("countries", "Non spécifiés")
+allergen_values = split_display_values(row.get("allergens"), limit=8)
+label_values = split_display_values(row.get("labels"), limit=8)
 nutrition_grade_display = str(row.get("nutrition_grade", "N/A") or "N/A").upper()
 nutri_score_display = row.get("nutriscore_score", "N/A")
 nova_display = row.get("nova_group", "N/A")
@@ -517,7 +748,7 @@ nutri_css_map = {
 }
 nutri_class = nutri_css_map.get(nutrition_grade_display, "nutri-na")
 
-left_col, right_col = st.columns([0.50, 0.50])
+left_col, right_col = st.columns([0.34, 0.66])
 
 with left_col:
     st.markdown("<div class='product-sheet'>", unsafe_allow_html=True)
@@ -560,32 +791,19 @@ with right_col:
         unsafe_allow_html=True,
     )
 
-    st.markdown("<p class='section-label'>Categories et pays</p>", unsafe_allow_html=True)
-    st.markdown(f"- Categories: {categories}")
-    st.markdown(f"- Pays: {countries}")
-
-    st.markdown("<p class='section-label'>Profil nutritionnel (pour 100g)</p>", unsafe_allow_html=True)
+    st.markdown("<p class='section-label'>Profil rapide pour 100g</p>", unsafe_allow_html=True)
     st.markdown(
         f"""
         <div class='nutrition-box'>
-            <p class='nutrition-line'><b>Glucides :</b> {row.get('carbohydrates_100g', 'N/A')} g</p>
-            <p class='nutrition-line'><b>Graisses :</b> {row.get('fat_100g', 'N/A')} g (dont saturées {row.get('saturated_fat_100g', 'N/A')} g)</p>
             <p class='nutrition-line'><b>Sucre :</b> {row.get('sugars_100g', 'N/A')} g</p>
-            <p class='nutrition-line'><b>Fibres :</b> {row.get('fiber_100g', 'N/A')} g</p>
-            <p class='nutrition-line'><b>Protéines :</b> {row.get('proteins_100g', 'N/A')} g</p>
             <p class='nutrition-line'><b>Sel :</b> {row.get('salt_100g', 'N/A')} g</p>
+            <p class='nutrition-line'><b>Graisses saturées :</b> {row.get('saturated_fat_100g', 'N/A')} g</p>
+            <p class='nutrition-line'><b>Fibres :</b> {row.get('fiber_100g', 'N/A')} g</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
-    st.markdown("<p class='section-label'>Ingredients, allergenes et labels</p>", unsafe_allow_html=True)
-    st.markdown(f"- Ingrédients: {row.get('ingredients', 'Non spécifiés')}")
-    st.markdown(f"- Allergènes: {row.get('allergens', 'Non spécifiés')}")
-    st.markdown(f"- Labels: {row.get('labels', 'Non spécifiés')}")
     st.markdown("</div>", unsafe_allow_html=True)
-
-st.markdown("---")
 
 # ==============================
 # VARIABLES NUTRITIONNELLES
@@ -746,6 +964,112 @@ def compute_health_score_oms(sugar, salt, fat_sat, fiber, proteins, nova, nutris
     return round(score, 2)
 
 
+def compute_health_score_breakdown(sugar, salt, fat_sat, fiber, proteins, nova, nutriscore):
+    """Retourne les bonus et pénalités qui expliquent le score santé."""
+
+    breakdown = []
+
+    try:
+        if sugar is not None and pd.notna(sugar):
+            sugar_val = float(sugar)
+            penalty = 0.0
+            if sugar_val <= 5:
+                penalty = 0.0
+            elif sugar_val <= 10:
+                penalty = 5.0
+            elif sugar_val <= 20:
+                penalty = 12.0
+            elif sugar_val <= 25:
+                penalty = 18.0
+            else:
+                penalty = 25.0
+            penalty += min((sugar_val / 25.0) * 2, 6)
+            penalty += min(sugar_val / 50.0, 2)
+            breakdown.append(("Sucre", -penalty, f"{sugar_val:.1f} g/100g"))
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        if salt is not None and pd.notna(salt):
+            salt_val = float(salt)
+            penalty = 0.0
+            if salt_val <= 0.3:
+                penalty = 0.0
+            elif salt_val <= 0.6:
+                penalty = 4.0
+            elif salt_val <= 1.2:
+                penalty = 10.0
+            elif salt_val <= 1.5:
+                penalty = 15.0
+            else:
+                penalty = 22.0
+            penalty += min((salt_val / 5.0) * 3, 6)
+            breakdown.append(("Sel", -penalty, f"{salt_val:.1f} g/100g"))
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        if fat_sat is not None and pd.notna(fat_sat):
+            fat_sat_val = float(fat_sat)
+            penalty = 0.0
+            if fat_sat_val <= 1.5:
+                penalty = 0.0
+            elif fat_sat_val <= 3:
+                penalty = 4.0
+            elif fat_sat_val <= 5:
+                penalty = 9.0
+            elif fat_sat_val <= 10:
+                penalty = 16.0
+            else:
+                penalty = 24.0
+            penalty += min((fat_sat_val / 22.0) * 3, 6)
+            breakdown.append(("Graisses saturées", -penalty, f"{fat_sat_val:.1f} g/100g"))
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        if fiber is not None and pd.notna(fiber):
+            fiber_val = float(fiber)
+            bonus = 0.0
+            if fiber_val >= 6:
+                bonus += 10.0
+            elif fiber_val >= 3:
+                bonus += 5.0
+            elif fiber_val > 0:
+                bonus += 2.0
+            bonus += min((fiber_val / 25.0) * 2, 5)
+            breakdown.append(("Fibres", bonus, f"{fiber_val:.1f} g/100g"))
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        if proteins is not None and pd.notna(proteins):
+            proteins_val = float(proteins)
+            bonus = 4.0 if proteins_val >= 10 else 2.0 if proteins_val >= 5 else 0.0
+            breakdown.append(("Protéines", bonus, f"{proteins_val:.1f} g/100g"))
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        if nova is not None and pd.notna(nova):
+            nova_val = int(nova)
+            penalty = 8.0 if nova_val == 4 else 3.0 if nova_val == 3 else 1.0 if nova_val == 2 else 0.0
+            breakdown.append(("NOVA", -penalty, f"groupe {nova_val}"))
+    except (TypeError, ValueError):
+        pass
+
+    nutriscore_val = str(nutriscore).upper()
+    nutri_delta = {"A": 8.0, "B": 5.0, "C": 0.0, "D": -6.0, "E": -12.0}.get(nutriscore_val, 0.0)
+    breakdown.append(("NutriScore", nutri_delta, nutriscore_val or "N/A"))
+
+    return breakdown
+
+
+def format_score_delta(value):
+    sign = "+" if value > 0 else ""
+    return f"{sign}{value:.1f} pts"
+
+
 def mode_explanation(label):
     if label == "1 - Même catégorie":
         return "Produits proches selon l’appartenance à la même catégorie principale."
@@ -792,12 +1116,58 @@ def render_recommendation_section(
         return
 
     for _, sim in df_results.iterrows():
+        if show_health_scores:
+            reasons = build_replacement_reasons(row, sim)
+            reason_html = "".join(f"<li>{escape(reason)}</li>" for reason in reasons)
+            score_source = sim.get("health_score_source", "N/A")
+            score_target = sim.get("health_score_cible", "N/A")
+            st.markdown("<div class='replace-card'>", unsafe_allow_html=True)
+            col1, col2 = st.columns([0.22, 0.78])
+
+            with col1:
+                sim_img = sim.get("image_url") or sim.get("image_small_url")
+                if pd.notna(sim_img) and str(sim_img).strip() != "":
+                    st.image(str(sim_img), width=130)
+                else:
+                    no_image_data = get_no_image_data_uri()
+                    if no_image_data:
+                        st.image(no_image_data, width=130)
+
+            with col2:
+                st.markdown(
+                    f"<p class='replace-title'>Remplacer par {escape(str(sim.get('nom_produit', 'Produit sans nom')))}</p>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    f"**Score santé :** {score_source} -> {score_target} &nbsp; "
+                    f"**NutriScore :** {sim.get('nutrition_grade', 'N/A')} &nbsp; "
+                    f"**NOVA :** {sim.get('nova_group', 'N/A')}"
+                )
+                st.markdown(f"<ul class='reason-list'>{reason_html}</ul>", unsafe_allow_html=True)
+                st.caption(f"Similarité : {sim.get('score_similarite', 0)} · Catégorie : {sim.get('categorie_principale', 'Non spécifiée')}")
+
+                button_key = f"{button_prefix}_{selected_method}_{sim['code_produit_cible']}"
+                if st.button(f"Voir détail {sim['code_produit_cible']}", key=button_key):
+                    st.session_state["selected_code"] = sim["code_produit_cible"]
+                    try:
+                        st.query_params["code"] = str(sim["code_produit_cible"])
+                    except AttributeError:
+                        st.experimental_set_query_params(code=str(sim["code_produit_cible"]))
+                    st.rerun()
+
+            st.markdown("</div>", unsafe_allow_html=True)
+            continue
+
         col1, col2 = st.columns([0.25, 0.75])
 
         with col1:
             sim_img = sim.get("image_url") or sim.get("image_small_url")
             if pd.notna(sim_img) and str(sim_img).strip() != "":
                 st.image(str(sim_img), width=120)
+            else:
+                no_image_data = get_no_image_data_uri()
+                if no_image_data:
+                    st.image(no_image_data, width=120)
 
         with col2:
             st.markdown(f"### {sim.get('nom_produit', 'Produit sans nom')}")
@@ -879,22 +1249,7 @@ if nutriscore in ["A", "B"] and not has_major_alert:
     alerts.append(("success", " Bon choix nutritionnel"))
 
 # ==============================
-# AFFICHAGE ALERTES
-# ==============================
-
-if alerts:
-    st.markdown("## Analyse nutritionnelle")
-
-    for level, message in alerts:
-        if level == "error":
-            st.error(message)
-        elif level == "warning":
-            st.warning(message)
-        elif level == "success":
-            st.success(message)
-
-# ==============================
-# 💚 SCORE SANTÉ
+# SCORE SANTÉ ET LECTURE SIMPLIFIÉE
 # ==============================
 
 score = compute_health_score_oms(
@@ -906,22 +1261,15 @@ score = compute_health_score_oms(
     nova=nova,
     nutriscore=nutriscore
 )
-
-st.markdown("## Score santé")
-st.metric("Score global", round(score, 2))
-
-if score >= 75:
-    st.success("Produit globalement intéressant sur le plan nutritionnel")
-elif score >= 50:
-    st.info("Produit acceptable, avec quelques limites")
-else:
-    st.warning("Produit à consommer avec modération")
-
-# ==============================
-# 🧠 ANALYSE INTELLIGENTE
-# ==============================
-
-st.markdown("## Analyse intelligente")
+score_breakdown = compute_health_score_breakdown(
+    sugar=sugar,
+    salt=salt,
+    fat_sat=fat_sat,
+    fiber=fiber,
+    proteins=proteins,
+    nova=nova,
+    nutriscore=nutriscore,
+)
 
 explications = []
 
@@ -1010,13 +1358,19 @@ for level, message in alerts:
 
 if not alerts_html:
     alerts_html = "<li class='alert-item success'>Aucune alerte nutritionnelle majeure detectee.</li>"
-    st.error("Produit à risque nutritionnel élevé")
-elif niveau_risque == "modéré":
-    st.warning("Produit acceptable, mais avec plusieurs limites nutritionnelles")
-else:
-    st.success("Produit globalement sain")
 
-st.markdown("### Explication")
+breakdown_html = ""
+for label, delta, context in score_breakdown:
+    delta_class = "delta-positive" if delta > 0 else "delta-negative" if delta < 0 else "delta-neutral"
+    breakdown_html += (
+        f"<li>"
+        f"<span><b>{escape(label)}</b><br><small>{escape(context)}</small></span>"
+        f"<span class='{delta_class}'>{format_score_delta(delta)}</span>"
+        f"</li>"
+    )
+
+if not breakdown_html:
+    breakdown_html = "<li><span>Aucun facteur chiffré disponible.</span><span class='delta-neutral'>0.0 pts</span></li>"
 
 exp_html = ""
 if explications:
@@ -1025,156 +1379,125 @@ if explications:
 else:
     exp_html = "<li>Aucune explication additionnelle.</li>"
 
-st.markdown("## Analyse nutritionnelle", unsafe_allow_html=True)
-analysis_col1, analysis_col2, analysis_col3 = st.columns([0.33, 0.33, 0.34])
+summary_tab, alternatives_tab, details_tab = st.tabs(
+    ["Resume", "Alternatives", "Details"]
+)
 
-with analysis_col1:
-    st.markdown(
-        f"""
-        <div class='analysis-card'>
-            <p class='analysis-title'>Score sante</p>
-            <p class='analysis-sub'>Evaluation globale inspiree des recommandations OMS</p>
-            <p class='score-big'>{round(score, 2)} <span style='font-size:1rem; font-weight:700; color:#64748b;'>/ 100</span></p>
-            <span class='status-chip {status_class}'>{status_text}</span>
-            <p style='margin:0.35rem 0 0; color:#334155; font-size:0.9rem;'>{score_hint}</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+with summary_tab:
+    st.markdown("## Resume nutritionnel", unsafe_allow_html=True)
+    analysis_col1, analysis_col2, analysis_col3 = st.columns([0.33, 0.33, 0.34])
 
-with analysis_col2:
-    st.markdown(
-        f"""
-        <div class='analysis-card'>
-            <p class='analysis-title'>Alertes cles</p>
-            <p class='analysis-sub'>Points sensibles detectes sur sucre, sel, graisses, NOVA et NutriScore</p>
-            <ul class='alert-list'>
-                {alerts_html}
-            </ul>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    with analysis_col1:
+        st.markdown(
+            f"""
+            <div class='analysis-card'>
+                <p class='analysis-title'>Score sante</p>
+                <p class='analysis-sub'>Evaluation globale inspiree des recommandations OMS</p>
+                <p class='score-big'>{round(score, 2)} <span style='font-size:1rem; font-weight:700; color:#64748b;'>/ 100</span></p>
+                <span class='status-chip {status_class}'>{status_text}</span>
+                <p style='margin:0.35rem 0 0; color:#334155; font-size:0.9rem;'>{score_hint}</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-with analysis_col3:
-    st.markdown(
-        f"""
-        <div class='analysis-card'>
-            <p class='analysis-title'>Explication</p>
-            <p class='analysis-sub'>Lecture detaillee des facteurs qui influencent le score</p>
-            <ul class='exp-list'>
-                {exp_html}
-            </ul>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    with analysis_col2:
+        st.markdown(
+            f"""
+            <div class='analysis-card'>
+                <p class='analysis-title'>Alertes cles</p>
+                <p class='analysis-sub'>Points sensibles detectes automatiquement</p>
+                <ul class='alert-list'>
+                    {alerts_html}
+                </ul>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-# ==============================
-# MESSAGE SI RIEN N'EST COCHÉ
-# ==============================
+    with analysis_col3:
+        st.markdown(
+            f"""
+            <div class='analysis-card'>
+                <p class='analysis-title'>A retenir</p>
+                <p class='analysis-sub'>Lecture courte du produit</p>
+                <ul class='exp-list'>
+                    {exp_html}
+                </ul>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-if show_recommendations_warning:
-    st.warning("Veuillez sélectionner au moins un type de recommandation pour afficher les suggestions.")
-st.markdown("---")
-st.markdown("## 🔍 Produits similaires")
-st.caption("Produits proches en composition et en catégorie.")
+    with st.expander("Voir le calcul du score sante", expanded=False):
+        st.markdown(f"<ul class='score-breakdown'>{breakdown_html}</ul>", unsafe_allow_html=True)
 
-if st.session_state.get("detail_reco_error"):
-    st.info("Les recommandations similaires ne sont pas encore disponibles dans cette base de données.")
+with alternatives_tab:
+    if show_recommendations_warning:
+        st.warning("Veuillez sélectionner au moins un type de recommandation pour afficher les suggestions.")
 
-if similar_df.empty:
-    st.info("Aucun produit similaire trouvé.")
-else:
-    for _, sim in similar_df.iterrows():
-        col1, col2 = st.columns([0.25, 0.75])
+    if st.session_state.get("detail_reco_error"):
+        st.info("Les recommandations ne sont pas encore disponibles dans cette base de données.")
 
-        with col1:
-            sim_img = sim.get("image_url") or sim.get("image_small_url")
-            if pd.notna(sim_img) and str(sim_img).strip() != "":
-                st.image(str(sim_img), width=120)
-            else:
-                no_image_data = get_no_image_data_uri()
-                if no_image_data:
-                    st.image(no_image_data, width=120)
+    if show_healthier:
+        render_recommendation_section(
+            title="Remplacer par...",
+            selected_label=selected_healthier_label,
+            selected_method=selected_healthier_method,
+            df_results=healthier_df,
+            button_prefix="healthy",
+            show_health_scores=True,
+        )
 
-        with col2:
-            st.markdown(f"### {sim.get('nom_produit', 'Produit sans nom')}")
-            st.markdown(f"**Score de similarité :** {sim.get('score_similarite', 0)}")
-            st.markdown(f"**Catégorie :** {sim.get('categorie_principale', 'Non spécifiée')}")
-            st.markdown(f"**NutriScore :** {sim.get('nutrition_grade', 'N/A')}")
-            st.markdown(f"**Groupe NOVA :** {sim.get('nova_group', 'N/A')}")
-            st.markdown(f"**Ingrédients communs :** {sim.get('ingredients_communs', 'Aucun')}")
-            st.markdown(f"**Nombre d’ingrédients communs :** {sim.get('nb_ingredients_communs', 0)}")
+    if show_similarity:
+        with st.expander("Produits similaires", expanded=False):
+            render_recommendation_section(
+                title="Produits similaires",
+                selected_label=selected_similarity_label,
+                selected_method=selected_similarity_method,
+                df_results=similar_df,
+                button_prefix="sim",
+                show_health_scores=False,
+            )
 
-# ==============================
-# PRODUITS SIMILAIRES
-# ==============================
+with details_tab:
+    st.markdown("### Informations produit")
+    product_info_rows = [
+        {"Champ": "Code produit", "Valeur": product_code},
+        {"Champ": "Nom", "Valeur": product_name},
+        {"Champ": "Marque", "Valeur": brand},
+        {"Champ": "Quantite", "Valeur": quantite},
+        {"Champ": "Categorie principale", "Valeur": category_main},
+        {"Champ": "Categories", "Valeur": categories},
+        {"Champ": "Pays", "Valeur": countries},
+    ]
+    st.dataframe(product_info_rows, use_container_width=True, hide_index=True)
 
-if show_similarity:
-    st.markdown("---")
-    render_recommendation_section(
-        title="Produits similaires",
-        selected_label=selected_similarity_label,
-        selected_method=selected_similarity_method,
-        df_results=similar_df,
-        button_prefix="sim",
-        show_health_scores=False,
-    )
+    st.markdown("### Valeurs nutritionnelles pour 100g")
+    nutrition_rows = [
+        {"Nutriment": "Glucides", "Valeur": row.get("carbohydrates_100g", "N/A"), "Unite": "g"},
+        {"Nutriment": "Graisses", "Valeur": row.get("fat_100g", "N/A"), "Unite": "g"},
+        {"Nutriment": "Graisses saturees", "Valeur": row.get("saturated_fat_100g", "N/A"), "Unite": "g"},
+        {"Nutriment": "Sucre", "Valeur": row.get("sugars_100g", "N/A"), "Unite": "g"},
+        {"Nutriment": "Fibres", "Valeur": row.get("fiber_100g", "N/A"), "Unite": "g"},
+        {"Nutriment": "Proteines", "Valeur": row.get("proteins_100g", "N/A"), "Unite": "g"},
+        {"Nutriment": "Sel", "Valeur": row.get("salt_100g", "N/A"), "Unite": "g"},
+    ]
+    st.dataframe(nutrition_rows, use_container_width=True, hide_index=True)
 
-# ==============================
-# ALTERNATIVES PLUS SAINES
-# ==============================
+    st.markdown("### Ingredients")
+    st.write(row.get("ingredients", "Non spécifiés"))
 
-st.markdown("## 🥗 Alternatives plus saines")
-st.caption("Produits proches en composition, avec une qualité nutritionnelle meilleure ou équivalente.")
+    detail_col1, detail_col2 = st.columns(2)
+    with detail_col1:
+        st.markdown("### Allergenes")
+        st.markdown(render_detail_badges(allergen_values, "badge-allergen"), unsafe_allow_html=True)
+    with detail_col2:
+        st.markdown("### Labels")
+        st.markdown(render_detail_badges(label_values, "badge-label"), unsafe_allow_html=True)
 
-if healthier_df.empty:
-    st.info("Aucune alternative plus saine trouvée.")
-else:
-    for _, sim in healthier_df.iterrows():
-        col1, col2 = st.columns([0.25, 0.75])
-
-        with col1:
-            sim_img = sim.get("image_url") or sim.get("image_small_url")
-            if pd.notna(sim_img) and str(sim_img).strip() != "":
-                st.image(str(sim_img), width=120)
-            else:
-                no_image_data = get_no_image_data_uri()
-                if no_image_data:
-                    st.image(no_image_data, width=120)
-
-        with col2:
-            st.markdown(f"### {sim.get('nom_produit', 'Produit sans nom')}")
-            st.markdown(f"**Score de similarité :** {sim.get('score_similarite', 0)}")
-            st.markdown(f"**Catégorie :** {sim.get('categorie_principale', 'Non spécifiée')}")
-            st.markdown(f"**NutriScore :** {sim.get('nutrition_grade', 'N/A')}")
-            st.markdown(f"**Groupe NOVA :** {sim.get('nova_group', 'N/A')}")
-            st.markdown(f"**Ingrédients communs :** {sim.get('ingredients_communs', 'Aucun')}")
-            st.markdown(f"**Nombre d’ingrédients communs :** {sim.get('nb_ingredients_communs', 0)}")
-
-            if st.button(
-                f"Voir détail sain {sim['code_produit_cible']}",
-                key=f"healthy_{sim['code_produit_cible']}"
-            ):
-                st.session_state["selected_code"] = sim["code_produit_cible"]
-                try:
-                    st.query_params["code"] = str(sim["code_produit_cible"])
-                except AttributeError:
-                    st.experimental_set_query_params(code=str(sim["code_produit_cible"]))
-                st.rerun()
-
-        st.markdown("---")
-if show_healthier:
-    st.markdown("---")
-    render_recommendation_section(
-        title="Alternatives plus saines",
-        selected_label=selected_healthier_label,
-        selected_method=selected_healthier_method,
-        df_results=healthier_df,
-        button_prefix="healthy",
-        show_health_scores=True,
-    )
+    if pd.notna(row.get("url")) and str(row.get("url")).strip() != "":
+        st.markdown(f"[Fiche OpenFoodFacts]({row['url']})")
 
 try:
     conn.close()

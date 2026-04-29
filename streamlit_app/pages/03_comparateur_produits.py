@@ -1,7 +1,9 @@
 import sys
 import warnings
 from pathlib import Path
+from html import escape
 
+import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
@@ -125,6 +127,24 @@ st.markdown(
     }
     .best-card h4 { margin: 0 0 0.4rem; color: #0f766e; font-size: 1.15rem; font-weight: 800; }
     .best-card p  { margin: 0.15rem 0; font-size: 0.95rem; color: #0f172a; }
+    .score-pill {
+        display: inline-block;
+        padding: 0.18rem 0.48rem;
+        border-radius: 999px;
+        font-size: 0.76rem;
+        font-weight: 800;
+        color: #0f766e;
+        background: #ccfbf1;
+        border: 1px solid rgba(15,118,110,0.18);
+        margin-bottom: 0.45rem;
+    }
+    .score-detail-list {
+        margin: 0.45rem 0 0;
+        padding-left: 1.1rem;
+        color: #334155;
+        font-size: 0.9rem;
+    }
+    .score-detail-list li { margin: 0.16rem 0; }
     /* Titre section critère */
     .section-title {
         font-size: 0.8rem;
@@ -149,7 +169,7 @@ render_page_hero(
 
 # ─── Vérification de la sélection ─────────────────────────────────────────────
 if "compare_selection" not in st.session_state or not st.session_state.compare_selection:
-    st.info("Aucun produit sélectionné. Retournez au Dashboard et cliquez sur **⚖️ Compare** sur 2 produits.")
+    st.info("Aucun produit sélectionné. Retournez au Dashboard et cliquez sur **⚖️ Compare** sur 2 à 4 produits.")
     st.stop()
 
 codes = [str(c) for c in st.session_state.compare_selection]
@@ -158,9 +178,9 @@ if len(codes) < 2:
     st.info("Sélectionnez au moins 2 produits pour comparer.")
     st.stop()
 
-if len(codes) > 2:
-    codes = codes[:2]
-    st.warning("Seuls les 2 premiers produits sélectionnés sont comparés.")
+if len(codes) > 4:
+    codes = codes[:4]
+    st.warning("Seuls les 4 premiers produits sélectionnés sont comparés.")
 
 # ─── Chargement des données ────────────────────────────────────────────────────
 conn = get_connection()
@@ -260,6 +280,125 @@ def fmt_g(val) -> str:
     return f"{f:.2f} g" if not pd.isna(f) else "—"
 
 
+def format_delta(value: float) -> str:
+    sign = "+" if value > 0 else ""
+    return f"{sign}{value:.1f} pts"
+
+
+def nutriscore_bonus(grade) -> float:
+    mapping = {"A": 8.0, "B": 5.0, "C": 0.0, "D": -6.0, "E": -12.0}
+    return mapping.get(str(grade).strip().upper(), 0.0)
+
+
+def compute_health_score_details(row) -> tuple[float, list[tuple[str, float, str]]]:
+    """Calcule un score santé explicable sur 100."""
+
+    score = 100.0
+    details: list[tuple[str, float, str]] = []
+
+    sugar = safe_float(row.get("sugars_100g"))
+    if not pd.isna(sugar):
+        penalty = 0.0
+        if sugar <= 5:
+            penalty = 0.0
+        elif sugar <= 10:
+            penalty = 5.0
+        elif sugar <= 20:
+            penalty = 12.0
+        elif sugar <= 25:
+            penalty = 18.0
+        else:
+            penalty = 25.0
+        penalty += min((sugar / 25.0) * 2, 6)
+        penalty += min(sugar / 50.0, 2)
+        score -= penalty
+        details.append(("Sucre", -penalty, f"{sugar:.1f} g/100g"))
+
+    salt = safe_float(row.get("salt_100g"))
+    if not pd.isna(salt):
+        penalty = 0.0
+        if salt <= 0.3:
+            penalty = 0.0
+        elif salt <= 0.6:
+            penalty = 4.0
+        elif salt <= 1.2:
+            penalty = 10.0
+        elif salt <= 1.5:
+            penalty = 15.0
+        else:
+            penalty = 22.0
+        penalty += min((salt / 5.0) * 3, 6)
+        score -= penalty
+        details.append(("Sel", -penalty, f"{salt:.1f} g/100g"))
+
+    fat_sat = safe_float(row.get("saturated_fat_100g"))
+    if not pd.isna(fat_sat):
+        penalty = 0.0
+        if fat_sat <= 1.5:
+            penalty = 0.0
+        elif fat_sat <= 3:
+            penalty = 4.0
+        elif fat_sat <= 5:
+            penalty = 9.0
+        elif fat_sat <= 10:
+            penalty = 16.0
+        else:
+            penalty = 24.0
+        penalty += min((fat_sat / 22.0) * 3, 6)
+        score -= penalty
+        details.append(("Graisses saturées", -penalty, f"{fat_sat:.1f} g/100g"))
+
+    fiber = safe_float(row.get("fiber_100g"))
+    if not pd.isna(fiber):
+        bonus = 0.0
+        if fiber >= 6:
+            bonus += 10.0
+        elif fiber >= 3:
+            bonus += 5.0
+        elif fiber > 0:
+            bonus += 2.0
+        bonus += min((fiber / 25.0) * 2, 5)
+        score += bonus
+        details.append(("Fibres", bonus, f"{fiber:.1f} g/100g"))
+
+    proteins = safe_float(row.get("proteins_100g"))
+    if not pd.isna(proteins):
+        bonus = 4.0 if proteins >= 10 else 2.0 if proteins >= 5 else 0.0
+        score += bonus
+        details.append(("Protéines", bonus, f"{proteins:.1f} g/100g"))
+
+    nova = safe_float(row.get("nova_group"))
+    if not pd.isna(nova):
+        nova_int = int(nova)
+        penalty = 8.0 if nova_int == 4 else 3.0 if nova_int == 3 else 1.0 if nova_int == 2 else 0.0
+        score -= penalty
+        details.append(("NOVA", -penalty, f"groupe {nova_int}"))
+
+    nutri_delta = nutriscore_bonus(row.get("nutriscore_grade"))
+    score += nutri_delta
+    details.append(("NutriScore", nutri_delta, str(row.get("nutriscore_grade") or "N/A").upper()))
+
+    return round(max(0.0, min(100.0, score)), 2), details
+
+
+def render_score_chart(score_df: pd.DataFrame):
+    plot_df = score_df.sort_values("Score santé")
+    fig, ax = plt.subplots(figsize=(7, max(2.8, 0.55 * len(plot_df))))
+    max_score = score_df["Score santé"].max()
+    colors = ["#0f766e" if value == max_score else "#94a3b8" for value in plot_df["Score santé"]]
+    bars = ax.barh(plot_df["Produit"], plot_df["Score santé"], color=colors)
+    ax.set_xlim(0, 100)
+    ax.set_xlabel("Score santé / 100")
+    ax.grid(axis="x", linestyle="--", alpha=0.25)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    for bar in bars:
+        value = bar.get_width()
+        ax.text(min(value + 1.2, 98), bar.get_y() + bar.get_height() / 2, f"{value:.1f}", va="center", fontsize=9)
+    fig.tight_layout()
+    return fig
+
+
 # Calcul des "meilleurs" et "pires" pour mise en évidence
 def best_worst_idx(series: pd.Series, higher_is_better: bool):
     """Renvoie (best_idx, worst_idx) ou (None, None) si pas assez de valeurs."""
@@ -269,6 +408,25 @@ def best_worst_idx(series: pd.Series, higher_is_better: bool):
     best = valid.idxmax() if higher_is_better else valid.idxmin()
     worst = valid.idxmin() if higher_is_better else valid.idxmax()
     return best, worst
+
+
+score_rows = []
+for idx, score_row in compare_df.iterrows():
+    score_value, _ = compute_health_score_details(score_row)
+    score_rows.append(
+        {
+            "Produit": str(score_row.get("product_name") or "Produit sans nom"),
+            "Code": str(score_row.get("code")),
+            "NutriScore": str(score_row.get("nutriscore_grade") or "N/A").upper(),
+            "NOVA": safe_float(score_row.get("nova_group")),
+            "Sucre": safe_float(score_row.get("sugars_100g")),
+            "Sel": safe_float(score_row.get("salt_100g")),
+            "Fibres": safe_float(score_row.get("fiber_100g")),
+            "Protéines": safe_float(score_row.get("proteins_100g")),
+            "Score santé": score_value,
+        }
+    )
+score_df = pd.DataFrame(score_rows)
 
 
 # ─── Cartes de comparaison ─────────────────────────────────────────────────────
@@ -304,11 +462,13 @@ for col_obj, (idx, row) in zip(cols, compare_df.iterrows()):
         name = str(row["product_name"]) if pd.notna(row["product_name"]) else "—"
         code = str(row["code"])
         cat  = str(row.get("categorie_principale") or "autres")
+        score_value = score_df.loc[score_df["Code"] == code, "Score santé"].iloc[0]
 
         card_html = (
             f"<div class='comp-card'>"
-            f"<h3>{name}</h3>"
-            f"<div class='subtitle'>Code&nbsp;{code} &nbsp;&middot;&nbsp; {cat}</div>"
+            f"<h3>{escape(name)}</h3>"
+            f"<div class='subtitle'>Code&nbsp;{escape(code)} &nbsp;&middot;&nbsp; {escape(cat)}</div>"
+            f"<span class='score-pill'>Score santé {score_value:.1f}/100</span>"
         )
 
         # ── NutriScore & NOVA ──────────────────────────────────────────
@@ -389,40 +549,59 @@ if compare_mode in ("Vue complète", "NutriScore & NOVA"):
         reason = "Groupe NOVA"
 
 elif compare_mode == "Profil nutritionnel":
-    # Score composite : pénalise sucre/sel/graisses, valorise fibres/protéines
-    def nutrition_score(r):
-        s = 0.0
-        sugar = safe_float(r.get("sugars_100g"))
-        salt  = safe_float(r.get("salt_100g"))
-        fat   = safe_float(r.get("saturated_fat_100g"))
-        fiber = safe_float(r.get("fiber_100g"))
-        prot  = safe_float(r.get("proteins_100g"))
-        if not pd.isna(sugar): s -= sugar / 50.0
-        if not pd.isna(salt):  s -= salt  / 25.0
-        if not pd.isna(fat):   s -= fat   / 30.0
-        if not pd.isna(fiber): s += fiber / 20.0
-        if not pd.isna(prot):  s += prot  / 50.0
-        return s
-    nutr_scores = compare_df.apply(nutrition_score, axis=1)
+    nutr_scores = pd.Series(
+        {
+            idx: score_df.loc[score_df["Code"] == str(row["code"]), "Score santé"].iloc[0]
+            for idx, row in compare_df.iterrows()
+        }
+    )
     idx = nutr_scores.idxmax()
     best_row = compare_df.loc[idx]
-    reason = "profil nutritionnel (sucre, sel, graisses, fibres, protéines)"
+    reason = "score santé explicable (sucre, sel, graisses, fibres, protéines, NOVA, NutriScore)"
 
 if best_row is not None:
     name_b = str(best_row["product_name"]) if pd.notna(best_row["product_name"]) else "—"
     cat_b  = str(best_row.get("categorie_principale") or "autres")
     ns_b   = nutri_badge(best_row.get("nutriscore_grade"))
     nv_b   = nova_badge(best_row.get("nova_group"))
+    best_score, best_details = compute_health_score_details(best_row)
+    detail_items = "".join(
+        f"<li><b>{escape(label)}:</b> {format_delta(delta)} ({escape(context)})</li>"
+        for label, delta, context in best_details
+    )
 
     st.markdown(
         f"<div class='best-card'>"
         f"<h4> Meilleur choix — mode <em>{compare_mode}</em></h4>"
-        f"<p style='font-size:1.05rem;font-weight:800;color:#0f172a;margin-bottom:0.5rem;'>{name_b}</p>"
-        f"<p><b>Catégorie :</b> {cat_b}</p>"
+        f"<p style='font-size:1.05rem;font-weight:800;color:#0f172a;margin-bottom:0.5rem;'>{escape(name_b)}</p>"
+        f"<p><b>Score santé :</b> {best_score:.1f}/100</p>"
+        f"<p><b>Catégorie :</b> {escape(cat_b)}</p>"
         f"<p><b>NutriScore :</b> {ns_b}</p>"
         f"<p><b>Groupe NOVA :</b> {nv_b}</p>"
         f"<p style='margin-top:0.6rem;font-size:0.8rem;color:#64748b;'>Critère : <em>{reason}</em></p>"
+        f"<ul class='score-detail-list'>{detail_items}</ul>"
         f"</div>",
         unsafe_allow_html=True,
     )
 
+st.markdown("## Synthèse comparative")
+st.dataframe(
+    score_df.sort_values("Score santé", ascending=False),
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Score santé": st.column_config.ProgressColumn(
+            "Score santé",
+            help="Score explicable sur 100. Plus la valeur est élevée, meilleur est le profil nutritionnel.",
+            min_value=0,
+            max_value=100,
+            format="%.1f",
+        ),
+        "Sucre": st.column_config.NumberColumn("Sucre", format="%.2f g"),
+        "Sel": st.column_config.NumberColumn("Sel", format="%.2f g"),
+        "Fibres": st.column_config.NumberColumn("Fibres", format="%.2f g"),
+        "Protéines": st.column_config.NumberColumn("Protéines", format="%.2f g"),
+    },
+)
+
+st.pyplot(render_score_chart(score_df), use_container_width=True)

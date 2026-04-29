@@ -1121,6 +1121,222 @@ def _render_rejection_quality_analysis(db) -> None:
                 st.info("Aucune suggestion disponible.")
 
 
+def _render_catalog_quality_summary(db) -> None:
+    with st.expander("Qualité des données catalogue"):
+        stats = db.execute(
+            text(
+                """
+                SELECT
+                    COUNT(DISTINCT p.code_produit) AS total_products,
+                    COUNT(DISTINCT p.code_produit) FILTER (
+                        WHERE COALESCE(
+                            NULLIF(TRIM(image_url), ''),
+                            NULLIF(TRIM(image_small_url), ''),
+                            NULLIF(TRIM(image_nutrition_url), '')
+                        ) IS NOT NULL
+                    ) AS products_with_image,
+                    COUNT(DISTINCT p.code_produit) FILTER (
+                        WHERE COALESCE(
+                            NULLIF(TRIM(image_url), ''),
+                            NULLIF(TRIM(image_small_url), ''),
+                            NULLIF(TRIM(image_nutrition_url), '')
+                        ) IS NULL
+                    ) AS products_without_image,
+                    COUNT(DISTINCT p.code_produit) FILTER (
+                        WHERE v.code_produit IS NOT NULL
+                          AND (
+                              v.energy_kcal_100g IS NOT NULL
+                              OR v.sugars_100g IS NOT NULL
+                              OR v.salt_100g IS NOT NULL
+                              OR v.saturated_fat_100g IS NOT NULL
+                              OR v.fiber_100g IS NOT NULL
+                              OR v.proteins_100g IS NOT NULL
+                          )
+                    ) AS products_with_nutrition,
+                    COUNT(DISTINCT p.code_produit) FILTER (
+                        WHERE v.code_produit IS NULL
+                           OR (
+                              v.energy_kcal_100g IS NULL
+                              AND v.sugars_100g IS NULL
+                              AND v.salt_100g IS NULL
+                              AND v.saturated_fat_100g IS NULL
+                              AND v.fiber_100g IS NULL
+                              AND v.proteins_100g IS NULL
+                           )
+                    ) AS products_without_nutrition,
+                    COUNT(DISTINCT p.code_produit) FILTER (WHERE NULLIF(TRIM(p.nutrition_grade), '') IS NOT NULL) AS products_with_nutriscore,
+                    COUNT(DISTINCT p.code_produit) FILTER (WHERE p.nutrition_grade IS NULL OR NULLIF(TRIM(p.nutrition_grade), '') IS NULL) AS products_without_nutriscore,
+                    COUNT(DISTINCT p.code_produit) FILTER (WHERE p.nova_group IS NOT NULL) AS products_with_nova,
+                    COUNT(DISTINCT p.code_produit) FILTER (WHERE p.nova_group IS NULL) AS products_without_nova,
+                    COUNT(DISTINCT p.code_produit) FILTER (WHERE NULLIF(TRIM(p.categorie_principale), '') IS NOT NULL) AS products_with_category,
+                    COUNT(DISTINCT p.code_produit) FILTER (WHERE p.categorie_principale IS NULL OR NULLIF(TRIM(p.categorie_principale), '') IS NULL) AS products_without_category,
+                    COUNT(DISTINCT p.code_produit) FILTER (WHERE p.id_marque IS NOT NULL) AS products_with_brand,
+                    COUNT(DISTINCT p.code_produit) FILTER (WHERE p.id_marque IS NULL) AS products_without_brand,
+                    COUNT(DISTINCT pi.code_produit) AS products_with_ingredients
+                FROM produit p
+                LEFT JOIN valeurs_nutritionnelles v ON p.code_produit = v.code_produit
+                LEFT JOIN produit_ingredient pi ON p.code_produit = pi.code_produit
+                """
+            )
+        ).mappings().first()
+
+        def stat_int(key: str) -> int:
+            return int(stats[key] or 0) if stats else 0
+
+        def rate(count: int, total: int) -> float:
+            return (count / total) * 100 if total else 0.0
+
+        total_products = stat_int("total_products")
+        products_with_image = stat_int("products_with_image")
+        products_without_image = stat_int("products_without_image")
+        products_with_nutrition = stat_int("products_with_nutrition")
+        products_without_nutrition = stat_int("products_without_nutrition")
+        products_with_nutriscore = stat_int("products_with_nutriscore")
+        products_without_nutriscore = stat_int("products_without_nutriscore")
+        products_with_nova = stat_int("products_with_nova")
+        products_without_nova = stat_int("products_without_nova")
+        products_with_category = stat_int("products_with_category")
+        products_without_category = stat_int("products_without_category")
+        products_with_brand = stat_int("products_with_brand")
+        products_without_brand = stat_int("products_without_brand")
+        products_with_ingredients = stat_int("products_with_ingredients")
+        products_without_ingredients = max(total_products - products_with_ingredients, 0)
+
+        quality_dimensions = [
+            products_with_image,
+            products_with_nutrition,
+            products_with_nutriscore,
+            products_with_nova,
+            products_with_category,
+            products_with_brand,
+            products_with_ingredients,
+        ]
+        completeness_rate = (
+            sum(rate(value, total_products) for value in quality_dimensions) / len(quality_dimensions)
+            if quality_dimensions
+            else 0.0
+        )
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Produits", total_products)
+        c2.metric("Complétude moyenne", f"{completeness_rate:.1f}%")
+        c3.metric("Sans image", products_without_image, f"{rate(products_with_image, total_products):.1f}% couverts")
+        c4.metric("Sans nutrition", products_without_nutrition, f"{rate(products_with_nutrition, total_products):.1f}% couverts")
+
+        st.markdown("**Couverture par dimension**")
+        coverage_rows = [
+            ("Images", products_with_image, products_without_image),
+            ("Nutrition", products_with_nutrition, products_without_nutrition),
+            ("NutriScore", products_with_nutriscore, products_without_nutriscore),
+            ("NOVA", products_with_nova, products_without_nova),
+            ("Catégorie principale", products_with_category, products_without_category),
+            ("Marque", products_with_brand, products_without_brand),
+            ("Ingrédients", products_with_ingredients, products_without_ingredients),
+        ]
+        st.dataframe(
+            [
+                {
+                    "Dimension": label,
+                    "Renseignés": present,
+                    "Manquants": missing,
+                    "Couverture": rate(present, total_products),
+                }
+                for label, present, missing in coverage_rows
+            ],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Couverture": st.column_config.ProgressColumn(
+                    "Couverture",
+                    min_value=0,
+                    max_value=100,
+                    format="%.1f%%",
+                )
+            },
+        )
+
+        missing_image_rows = db.execute(
+            text(
+                """
+                SELECT
+                    p.code_produit,
+                    p.nom_produit,
+                    (
+                        CASE WHEN COALESCE(NULLIF(TRIM(p.image_url), ''), NULLIF(TRIM(p.image_small_url), ''), NULLIF(TRIM(p.image_nutrition_url), '')) IS NULL THEN 1 ELSE 0 END
+                        + CASE WHEN v.code_produit IS NULL OR (
+                            v.energy_kcal_100g IS NULL
+                            AND v.sugars_100g IS NULL
+                            AND v.salt_100g IS NULL
+                            AND v.saturated_fat_100g IS NULL
+                            AND v.fiber_100g IS NULL
+                            AND v.proteins_100g IS NULL
+                        ) THEN 1 ELSE 0 END
+                        + CASE WHEN p.nutrition_grade IS NULL OR NULLIF(TRIM(p.nutrition_grade), '') IS NULL THEN 1 ELSE 0 END
+                        + CASE WHEN p.nova_group IS NULL THEN 1 ELSE 0 END
+                        + CASE WHEN p.categorie_principale IS NULL OR NULLIF(TRIM(p.categorie_principale), '') IS NULL THEN 1 ELSE 0 END
+                        + CASE WHEN p.id_marque IS NULL THEN 1 ELSE 0 END
+                        + CASE WHEN NOT EXISTS (
+                            SELECT 1 FROM produit_ingredient pi2 WHERE pi2.code_produit = p.code_produit
+                        ) THEN 1 ELSE 0 END
+                    ) AS champs_manquants,
+                    CONCAT_WS(', ',
+                        CASE WHEN COALESCE(NULLIF(TRIM(p.image_url), ''), NULLIF(TRIM(p.image_small_url), ''), NULLIF(TRIM(p.image_nutrition_url), '')) IS NULL THEN 'image' END,
+                        CASE WHEN v.code_produit IS NULL OR (
+                            v.energy_kcal_100g IS NULL
+                            AND v.sugars_100g IS NULL
+                            AND v.salt_100g IS NULL
+                            AND v.saturated_fat_100g IS NULL
+                            AND v.fiber_100g IS NULL
+                            AND v.proteins_100g IS NULL
+                        ) THEN 'nutrition' END,
+                        CASE WHEN p.nutrition_grade IS NULL OR NULLIF(TRIM(p.nutrition_grade), '') IS NULL THEN 'NutriScore' END,
+                        CASE WHEN p.nova_group IS NULL THEN 'NOVA' END,
+                        CASE WHEN p.categorie_principale IS NULL OR NULLIF(TRIM(p.categorie_principale), '') IS NULL THEN 'catégorie' END,
+                        CASE WHEN p.id_marque IS NULL THEN 'marque' END,
+                        CASE WHEN NOT EXISTS (
+                            SELECT 1 FROM produit_ingredient pi2 WHERE pi2.code_produit = p.code_produit
+                        ) THEN 'ingrédients' END
+                    ) AS champs_a_completer
+                FROM produit p
+                LEFT JOIN valeurs_nutritionnelles v ON p.code_produit = v.code_produit
+                WHERE COALESCE(
+                    NULLIF(TRIM(p.image_url), ''),
+                    NULLIF(TRIM(p.image_small_url), ''),
+                    NULLIF(TRIM(p.image_nutrition_url), '')
+                ) IS NULL
+                   OR v.code_produit IS NULL
+                   OR p.nutrition_grade IS NULL
+                   OR p.nova_group IS NULL
+                   OR p.categorie_principale IS NULL
+                   OR p.id_marque IS NULL
+                   OR NOT EXISTS (
+                       SELECT 1 FROM produit_ingredient pi2 WHERE pi2.code_produit = p.code_produit
+                   )
+                ORDER BY champs_manquants DESC, p.code_produit
+                LIMIT 10
+                """
+            )
+        ).mappings().all()
+
+        if missing_image_rows:
+            st.markdown("**Produits les plus incomplets**")
+            st.dataframe(
+                [
+                    {
+                        "Code": row["code_produit"],
+                        "Produit": row["nom_produit"] or "Sans nom",
+                        "Champs manquants": row["champs_manquants"],
+                        "À compléter": row["champs_a_completer"] or "-",
+                    }
+                    for row in missing_image_rows
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.success("Aucun produit incomplet détecté sur les dimensions suivies.")
+
+
 def _render_recent_admin_activity(db) -> None:
     with st.expander("Dernières actions admin"):
         status_filter = st.selectbox(
@@ -1284,19 +1500,114 @@ def _show_admin_flash():
         st.success(message)
 
 
+def _set_admin_mode(mode: str, **state_updates) -> None:
+    st.session_state["admin_mode"] = mode
+    for key, value in state_updates.items():
+        if value is None:
+            st.session_state.pop(key, None)
+        else:
+            st.session_state[key] = value
+    st.rerun()
+
+
+def _admin_shell_style() -> None:
+    st.markdown(
+        """
+        <style>
+        .admin-shell-title {
+            margin: 0;
+            font-size: 1.45rem;
+            font-weight: 800;
+            color: #0f172a;
+            line-height: 1.15;
+        }
+
+        .admin-shell-subtitle {
+            margin: 0.2rem 0 0;
+            color: #64748b;
+            font-size: 0.92rem;
+        }
+
+        .admin-section-title {
+            margin: 0.8rem 0 0.25rem;
+            font-size: 1.05rem;
+            font-weight: 750;
+            color: #0f172a;
+        }
+
+        .admin-section-caption {
+            margin: 0 0 0.75rem;
+            color: #64748b;
+            font-size: 0.9rem;
+        }
+
+        .admin-nav-spacer {
+            margin-bottom: 0.65rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _admin_header() -> None:
+    _admin_shell_style()
+    title_col, action_col = st.columns([4, 1])
+    with title_col:
+        st.markdown(
+            """
+            <h2 class="admin-shell-title">Administration</h2>
+            <p class="admin-shell-subtitle">
+                Gestion du catalogue, corrections pipeline et qualité des données.
+            </p>
+            """,
+            unsafe_allow_html=True,
+        )
+    with action_col:
+        _logout_ui()
+
+
+def _admin_section_nav(active_section: str) -> None:
+    nav_catalog, nav_rejections, nav_new, _ = st.columns([1.2, 1.4, 1.1, 3.1])
+
+    with nav_catalog:
+        if st.button(
+            "Catalogue",
+            type="primary" if active_section == "catalogue" else "secondary",
+            use_container_width=True,
+        ) and active_section != "catalogue":
+            _set_admin_mode("list")
+
+    with nav_rejections:
+        if st.button(
+            "Corrections",
+            type="primary" if active_section == "rejections" else "secondary",
+            use_container_width=True,
+        ) and active_section != "rejections":
+            _set_admin_mode("reject_list")
+
+    with nav_new:
+        if st.button("Ajouter", type="secondary", use_container_width=True):
+            _set_admin_mode("new", admin_code=None)
+
+    st.markdown('<div class="admin-nav-spacer"></div>', unsafe_allow_html=True)
+
+
+def _admin_section_heading(title: str, caption: str) -> None:
+    st.markdown(f'<div class="admin-section-title">{title}</div>', unsafe_allow_html=True)
+    st.markdown(f'<p class="admin-section-caption">{caption}</p>', unsafe_allow_html=True)
+
+
 # =========================
 # Admin - Liste Produits
 # =========================
 def _products_list_ui():
-    st.subheader("📦 Admin - Produits")
+    _admin_section_nav("catalogue")
+    _admin_section_heading(
+        "Catalogue produits",
+        "Recherche, modification et suivi des fiches produit présentes dans le catalogue.",
+    )
     _show_admin_flash()
-    nav1, nav2 = st.columns([1, 1])
-    with nav1:
-        st.button("📦 Produits", disabled=True, use_container_width=True)
-    with nav2:
-        if st.button("🛠️ Rejets à revoir", use_container_width=True):
-            st.session_state["admin_mode"] = "reject_list"
-            st.rerun()
 
     c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
@@ -1319,6 +1630,8 @@ def _products_list_ui():
 
     db = SessionLocal()
     try:
+        _ensure_rejected_review_schema(db)
+        _render_catalog_quality_summary(db)
         query_db = db.query(Product)
 
         qn = (q or "").strip()
@@ -1357,12 +1670,6 @@ def _products_list_ui():
         st.caption(f"Total: **{total}** | Pages: **{total_pages}** | Page: **{page}**")
 
         st.divider()
-        if st.button("➕ Ajouter un produit"):
-            st.session_state["admin_mode"] = "new"
-            st.session_state.pop("admin_code", None)
-            st.rerun()
-
-        st.divider()
 
         for p in products:
             col1, col2, col3 = st.columns([3, 1, 1])
@@ -1397,15 +1704,12 @@ def _products_list_ui():
 # Admin - Liste des rejets
 # =========================
 def _rejected_products_list_ui():
-    st.subheader("🛠️ Produits rejetés à revoir")
+    _admin_section_nav("rejections")
+    _admin_section_heading(
+        "Corrections et rejets",
+        "Traitement des produits rejetés, validation des suggestions et suivi du pipeline.",
+    )
     _show_admin_flash()
-    nav1, nav2 = st.columns([1, 1])
-    with nav1:
-        if st.button("📦 Produits", use_container_width=True):
-            st.session_state["admin_mode"] = "list"
-            st.rerun()
-    with nav2:
-        st.button("🛠️ Rejets à revoir", disabled=True, use_container_width=True)
 
     c1, c2 = st.columns([2, 1])
     with c1:
@@ -1696,7 +2000,11 @@ def _rejected_product_form_ui(rejected_id: int | None):
         corrected_payload = rejected.corrected_payload if isinstance(rejected.corrected_payload, dict) else {}
         issues = rejected.quality_issues if isinstance(rejected.quality_issues, list) else []
 
-        st.subheader(f"✏️ Revue de suggestion — {rejected.code_produit}")
+        _admin_section_nav("rejections")
+        _admin_section_heading(
+            f"Revue de correction - {rejected.code_produit}",
+            "Comparer la donnée source, la suggestion système et la correction validée.",
+        )
         st.caption(
             f"Nom: {rejected.product_name or 'N/A'} | "
             f"Marque: {rejected.brands or 'N/A'} | "
@@ -2277,7 +2585,11 @@ def _product_form_ui(is_edit: bool, code: str | None = None):
             )
         nutrition = _get_nutrition_for_product(db, str(p.code_produit)) if p else None
 
-        st.subheader("✏️ Modifier un produit" if is_edit else "➕ Ajouter un produit")
+        _admin_section_nav("catalogue")
+        _admin_section_heading(
+            "Modifier un produit" if is_edit else "Ajouter un produit",
+            "Préparer une correction validée admin qui sera reprise par le pipeline.",
+        )
         st.info("Les changements sont enregistrés comme corrections validées admin. Ils seront intégrés au catalogue par le pipeline.")
         _show_admin_flash()
         if is_edit and p:
@@ -2629,7 +2941,11 @@ def _product_form_ui(is_edit: bool, code: str | None = None):
 # Admin - Delete confirm
 # =========================
 def _delete_ui(code: str | None):
-    st.subheader(f"🗑️ Supprimer produit {code}")
+    _admin_section_nav("catalogue")
+    _admin_section_heading(
+        f"Supprimer produit {code}",
+        "La suppression directe est bloquée pour conserver un flux contrôlé par le pipeline.",
+    )
 
     code_clean = str(code).strip() if code is not None else ""
 
@@ -2680,8 +2996,7 @@ def run_admin():
         _login_ui()
         return
 
-    st.success("Connecté en tant qu'administrateur")
-    _logout_ui()
+    _admin_header()
 
     mode = st.session_state.get("admin_mode", "list")
 

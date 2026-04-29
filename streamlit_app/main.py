@@ -85,7 +85,6 @@ def shorten_text(text: str, max_length: int = 30) -> str:
     return text[: max_length - 1] + "…"
 
 
-
 ########################################
 # CONFIGURATION GLOBALE DE LA PAGE
 ########################################
@@ -119,8 +118,9 @@ if "page" not in st.session_state:
     st.session_state.page = 1
 
 if "compare_selection" not in st.session_state:
-    # Liste des codes produits sélectionnés pour la comparaison (max 3)
+    # Liste des codes produits sélectionnés pour la comparaison (max 4)
     st.session_state.compare_selection = []
+
 if "favorites" not in st.session_state:
     # Liste des codes produits marqués comme favoris (panier santé)
     st.session_state.favorites = []
@@ -135,6 +135,11 @@ try:
         """
         SELECT DISTINCT COALESCE(NULLIF(TRIM(categorie_principale), ''), 'autres') AS categorie_principale
         FROM produit
+        WHERE categorie_principale IS NULL
+           OR (
+                TRIM(categorie_principale) NOT LIKE '[%'
+            AND POSITION(E'\n' IN categorie_principale) = 0
+           )
         ORDER BY 1
         """,
         conn,
@@ -158,7 +163,7 @@ except Exception:
 # BARRE DE RECHERCHE & FILTRES PRINCIPAUX
 ########################################
 st.markdown("---")
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns([1.2, 1, 1, 0.9])
 
 st.markdown(
     """
@@ -212,6 +217,9 @@ with col1:
     search_name = st.text_input("Rechercher par nom")
 
 with col2:
+    search_code = st.text_input("Code produit / code-barres")
+
+with col3:
     # Filtre sur la catégorie principale (valeur exacte parmi les catégories connues)
     selected_main_category = st.selectbox(
         "Catégorie principale (exacte)",
@@ -219,7 +227,7 @@ with col2:
         index=0,
     )
 
-with col3:
+with col4:
     # Filtre quantitatif sur le sucre (borne haute en g/100g)
     max_sugar = st.number_input("Sucre max (g/100g)", min_value=0.0, value=50.0)
 
@@ -263,6 +271,7 @@ category_detail_filter = st.text_input(
 # ==============================
 current_filters_signature = (
     search_name,
+    search_code,
     selected_main_category,
     float(max_sugar),
     tuple(nutriscore_filter),
@@ -312,10 +321,16 @@ if search_name:
     # Filtre textuel sur le nom du produit (LIKE insensible à la casse)
     query += " AND LOWER(p.nom_produit) LIKE LOWER(%(search_name)s)"
 
+if search_code:
+    query += " AND p.code_produit LIKE %(search_code)s"
+
 query_params = {"max_sugar": float(max_sugar)}
 
 if search_name:
     query_params["search_name"] = f"%{search_name}%"
+
+if search_code:
+    query_params["search_code"] = f"%{search_code.strip()}%"
 
 if selected_main_category != "Toutes":
     # Filtre exact sur la catégorie principale (avec gestion des valeurs vides → 'autres')
@@ -441,6 +456,7 @@ elif sort_option == "Sel (g/100g)":
 # sucre par défaut). Dans ce cas, on affiche un petit échantillon.
 is_home = (
     (not search_name)
+    and (not search_code)
     and (selected_main_category == "Toutes")
     and (not category_detail_filter)
     and max_sugar == 50.0
@@ -621,8 +637,8 @@ for index, row in df_page.iterrows():
                         c for c in st.session_state.compare_selection if c != code_str
                     ]
                 else:
-                    if len(st.session_state.compare_selection) >= 2:
-                        st.info("Vous ne pouvez comparer que 2 produits à la fois. Décochez un produit avant d'en ajouter un autre.")
+                    if len(st.session_state.compare_selection) >= 4:
+                        st.info("Vous ne pouvez comparer que 4 produits à la fois. Décochez un produit avant d'en ajouter un autre.")
                     else:
                         st.session_state.compare_selection.append(code_str)
                 st.rerun()
