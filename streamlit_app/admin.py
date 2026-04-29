@@ -1,5 +1,6 @@
 import os
 import math
+import re
 from datetime import datetime, UTC
 import streamlit as st
 
@@ -13,6 +14,7 @@ from models import (
     Marque,
     Categorie,
     Ingredient,
+    ValeursNutritionnelles,
     RejectedProductReview,
     ProductCategorySuggestion,
     produit_categorie,
@@ -137,6 +139,135 @@ def _replace_product_ingredients(db, code_produit: str, ingredients: list[Ingred
         )
 
 
+def _get_nutrition_for_product(db, code_produit: str) -> ValeursNutritionnelles | None:
+    return (
+        db.execute(
+            select(ValeursNutritionnelles)
+            .where(ValeursNutritionnelles.code_produit == code_produit)
+        )
+        .scalars()
+        .first()
+    )
+
+
+def _upsert_product_nutrition(db, code_produit: str, nutrient_values: dict[str, str]) -> None:
+    nutrition = _get_nutrition_for_product(db, code_produit)
+    parsed_values = {
+        key: _parse_optional_float(value)
+        for key, value in nutrient_values.items()
+    }
+    if not any(value is not None for value in parsed_values.values()):
+        if nutrition is not None:
+            db.delete(nutrition)
+        return
+
+    if nutrition is None:
+        nutrition = ValeursNutritionnelles(code_produit=code_produit)
+        db.add(nutrition)
+
+    for key, value in parsed_values.items():
+        setattr(nutrition, key, value)
+
+
+def _build_manual_product_payload(
+    *,
+    code: str,
+    name: str,
+    brand: str,
+    quantity: str,
+    categories: list[str],
+    ingredients: str,
+    grade: str,
+    nutri_score,
+    nova,
+    url: str,
+    image_url: str,
+    nutrient_values: dict[str, str],
+) -> dict:
+    payload = {
+        "code": code,
+        "product_name": name.strip(),
+        "brands": brand.strip() or None,
+        "quantity": quantity.strip() or None,
+        "categories": ", ".join(categories),
+        "categories_tags": [_tag_label_to_tag(category) for category in categories if _tag_label_to_tag(category)],
+        "categorie_principale": categories[0].strip().lower() if categories else None,
+        "ingredients_text": ingredients.strip() or None,
+        "nutriscore_grade": grade.strip().lower()[:1] or None,
+        "nutriscore_score": nutri_score,
+        "nova_group": nova,
+        "url": url.strip() or None,
+        "image_url": image_url.strip() or None,
+        "_manual_review": {
+            "reviewed_at": _utcnow().isoformat(),
+            "source": "streamlit_admin_new_product",
+        },
+    }
+    nutriments = {}
+    nutrient_payload_keys = {
+        "energy_kcal_100g": ("energy-kcal_100g", "energy_kcal_100g"),
+        "fat_100g": ("fat_100g",),
+        "saturated_fat_100g": ("saturated-fat_100g", "saturated_fat_100g"),
+        "carbohydrates_100g": ("carbohydrates_100g",),
+        "sugars_100g": ("sugars_100g",),
+        "fiber_100g": ("fiber_100g",),
+        "proteins_100g": ("proteins_100g",),
+        "salt_100g": ("salt_100g",),
+    }
+    for nutrient_key, payload_keys in nutrient_payload_keys.items():
+        value = _parse_optional_float(nutrient_values.get(nutrient_key, ""))
+        payload[nutrient_key] = value
+        for payload_key in payload_keys:
+            nutriments[payload_key] = value
+    payload["nutriments"] = nutriments
+    return payload
+
+
+def _upsert_admin_product_pipeline_submission(
+    db,
+    *,
+    code: str,
+    name: str,
+    brand: str,
+    corrected_payload: dict,
+    source_task: str,
+    quality_issues: list[str] | None = None,
+) -> RejectedProductReview:
+    existing = (
+        db.execute(
+            select(RejectedProductReview)
+            .where(
+                RejectedProductReview.code_produit == code,
+                RejectedProductReview.source_task == source_task,
+                RejectedProductReview.review_status.in_(["pending", "suggested", "validated", "needs_review"]),
+            )
+            .order_by(RejectedProductReview.rejected_id.desc())
+        )
+        .scalars()
+        .first()
+    )
+    now = _utcnow()
+    if existing is None:
+        existing = RejectedProductReview(
+            code_produit=code,
+            created_at=now,
+            source_task=source_task,
+            import_type="manual",
+            raw_payload=corrected_payload,
+            quality_issues=quality_issues or [],
+        )
+        db.add(existing)
+
+    existing.product_name = name.strip()
+    existing.brands = brand.strip() or None
+    existing.raw_payload = corrected_payload
+    existing.corrected_payload = corrected_payload
+    existing.quality_issues = quality_issues or []
+    existing.review_status = "validated"
+    existing.updated_at = now
+    return existing
+
+
 def _get_selected_categories_for_product(db, code_produit: str) -> list[str]:
     rows = db.execute(
         select(Categorie.categorie)
@@ -179,7 +310,7 @@ def _humanize_review_status(status: str | None) -> str:
     mapping = {
         "pending": "A corriger",
         "suggested": "Suggestion disponible",
-        "validated": "Suggestion validée",
+        "validated": "Correction validée",
         "resolved": "Validé par le pipeline",
         "ignored": "Ignoré",
         "needs_review": "A revoir",
@@ -202,18 +333,92 @@ def _humanize_suggestion_status(status: str | None) -> str:
     return mapping.get(status, status)
 
 
+def _humanize_admin_source(source_task: str | None) -> str:
+    mapping = {
+        "streamlit_manual_add": "Ajout admin",
+        "streamlit_product_edit": "Modification admin",
+        "first_clean_from_bronze": "Correction rejet",
+        "second_clean_from_bad": "Correction rejet",
+    }
+    if not source_task:
+        return "N/A"
+    return mapping.get(source_task, source_task)
+
+
+def _pipeline_status_label(review: RejectedProductReview | None) -> str:
+    if review is None:
+        return "A jour"
+    if review.review_status == "validated":
+        return "En attente pipeline"
+    if review.review_status == "resolved":
+        return "Applique par pipeline"
+    if review.review_status == "needs_review":
+        return "A revoir"
+    if review.review_status == "ignored":
+        return "Ignore"
+    return _humanize_review_status(review.review_status)
+
+
+def _latest_pipeline_reviews_for_codes(db, codes: list[str]) -> dict[str, RejectedProductReview]:
+    clean_codes = [str(code).strip() for code in codes if str(code).strip()]
+    if not clean_codes:
+        return {}
+
+    rows = (
+        db.execute(
+            select(RejectedProductReview)
+            .where(
+                RejectedProductReview.code_produit.in_(clean_codes),
+                RejectedProductReview.corrected_payload.is_not(None),
+            )
+            .order_by(
+                RejectedProductReview.code_produit.asc(),
+                RejectedProductReview.updated_at.desc(),
+                RejectedProductReview.rejected_id.desc(),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    latest: dict[str, RejectedProductReview] = {}
+    for review in rows:
+        code = str(review.code_produit)
+        if code not in latest:
+            latest[code] = review
+    return latest
+
+
+def _product_correction_history(db, code: str, limit: int = 5) -> list[RejectedProductReview]:
+    code_clean = str(code or "").strip()
+    if not code_clean:
+        return []
+    return (
+        db.execute(
+            select(RejectedProductReview)
+            .where(
+                RejectedProductReview.code_produit == code_clean,
+                RejectedProductReview.corrected_payload.is_not(None),
+            )
+            .order_by(RejectedProductReview.updated_at.desc(), RejectedProductReview.rejected_id.desc())
+            .limit(limit)
+        )
+        .scalars()
+        .all()
+    )
+
+
 def _payload_field_value(payload: dict, *keys: str) -> str:
     for key in keys:
-        value = payload.get(key)
+        value = _payload_get(payload, key)
         if value is None:
             continue
         if isinstance(value, list):
             formatted = ", ".join(str(item) for item in value if item not in {None, ""})
-            if formatted:
+            if _is_filled(formatted):
                 return formatted
             continue
         text = str(value).strip()
-        if text:
+        if _is_filled(text):
             return text
     return ""
 
@@ -223,6 +428,805 @@ def _manual_or_source_value(manual_value, source_value: str) -> str:
         return source_value
     text = str(manual_value).strip()
     return text if text else source_value
+
+
+def _ensure_rejected_review_schema(db) -> None:
+    """Keep older local databases compatible with the enhanced review screen."""
+    db.execute(text("ALTER TABLE rejected_products_review ADD COLUMN IF NOT EXISTS corrected_payload JSONB"))
+    db.commit()
+
+
+def _is_filled(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, list | tuple | set):
+        return any(_is_filled(item) for item in value)
+    if isinstance(value, dict):
+        return bool(value)
+    text_value = str(value).strip()
+    normalized = text_value.lower()
+    empty_tokens = {
+        "nan",
+        "none",
+        "null",
+        "unknown",
+        "undefined",
+        "not-applicable",
+        "not applicable",
+        "n/a",
+        "[]",
+        "{}",
+        "en:null",
+        "en:unknown",
+        "en:undefined",
+    }
+    return bool(text_value) and normalized not in empty_tokens
+
+
+def _payload_first(payload: dict, *keys: str):
+    for key in keys:
+        value = _payload_get(payload, key)
+        if _is_filled(value):
+            return value
+    return None
+
+
+def _payload_get(payload: dict, key: str):
+    if key in payload:
+        return payload.get(key)
+
+    current = payload
+    for part in key.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current.get(part)
+    return current
+
+
+def _payload_text(payload: dict, *keys: str) -> str:
+    value = _payload_first(payload, *keys)
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value if _is_filled(item))
+    text_value = str(value).strip()
+    return text_value if _is_filled(text_value) else ""
+
+
+def _payload_number(payload: dict, *keys: str):
+    value = _payload_first(payload, *keys)
+    if value is None:
+        return None
+    try:
+        return float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+
+
+def _value_from_sources(*values) -> str:
+    for value in values:
+        if _is_filled(value):
+            if isinstance(value, list):
+                return ", ".join(str(item) for item in value if _is_filled(item))
+            return str(value).strip()
+    return ""
+
+
+def _tag_label_to_tag(label: str) -> str:
+    clean_label = str(label or "").strip().lower()
+    if not clean_label:
+        return ""
+    if clean_label.startswith("en:"):
+        return clean_label
+    return "en:" + re.sub(r"[^a-z0-9]+", "-", clean_label).strip("-")
+
+
+def _nutrient_number(payload: dict, top_key: str, aliases: tuple[str, ...]):
+    value = _payload_number(payload, top_key)
+    if value is not None:
+        return value
+
+    nutriments = payload.get("nutriments")
+    if not isinstance(nutriments, dict):
+        return None
+
+    for alias in aliases:
+        value = _payload_number(nutriments, alias)
+        if value is not None:
+            return value
+    return None
+
+
+def _parse_optional_float(value: str):
+    text_value = str(value or "").strip()
+    if not text_value:
+        return None
+    return float(text_value.replace(",", "."))
+
+
+def _parse_optional_int(value: str):
+    text_value = str(value or "").strip()
+    if not text_value:
+        return None
+    return int(float(text_value.replace(",", ".")))
+
+
+def _format_optional_number(value) -> str:
+    if value is None:
+        return ""
+    try:
+        return f"{float(value):g}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _format_datetime(value) -> str:
+    if value is None:
+        return "N/A"
+    return value.strftime("%Y-%m-%d %H:%M") if hasattr(value, "strftime") else str(value)
+
+
+def _field_hint(text: str) -> None:
+    st.caption(f"Indice: {text}")
+
+
+_CORE_NUTRIENT_FIELDS = [
+    ("energy_kcal_100g", "Énergie", ("energy_kcal_100g", "energy-kcal_100g", "energy_100g", "energy-kj_100g")),
+    ("fat_100g", "Matières grasses", ("fat_100g",)),
+    ("saturated_fat_100g", "Graisses saturées", ("saturated_fat_100g", "saturated-fat_100g")),
+    ("carbohydrates_100g", "Glucides", ("carbohydrates_100g",)),
+    ("sugars_100g", "Sucres", ("sugars_100g",)),
+    ("fiber_100g", "Fibres", ("fiber_100g",)),
+    ("proteins_100g", "Protéines", ("proteins_100g",)),
+    ("salt_100g", "Sel", ("salt_100g", "sodium_100g")),
+]
+
+_PRODUCT_IMAGE_KEYS = (
+    "image_url",
+    "image_front_url",
+    "image_small_url",
+    "image_front_small_url",
+    "image_thumb_url",
+    "image_front_thumb_url",
+)
+
+_NUTRITION_IMAGE_KEYS = (
+    "image_nutrition_url",
+    "image_nutrition_small_url",
+    "image_nutrition_thumb_url",
+)
+
+
+def _selected_image_url(payload: dict, image_type: str) -> str:
+    selected_images = payload.get("selected_images")
+    if not isinstance(selected_images, dict):
+        return ""
+
+    image_group = selected_images.get(image_type)
+    if not isinstance(image_group, dict):
+        return ""
+
+    for size in ("display", "small", "thumb"):
+        candidates = image_group.get(size)
+        if not isinstance(candidates, dict):
+            continue
+        for lang in ("en", "fr", "front", "nutrition"):
+            value = candidates.get(lang)
+            if _is_filled(value):
+                return str(value).strip()
+        for value in candidates.values():
+            if _is_filled(value):
+                return str(value).strip()
+
+    return ""
+
+
+def _payload_image_url(payload: dict, image_type: str = "product") -> str:
+    keys = _NUTRITION_IMAGE_KEYS if image_type == "nutrition" else _PRODUCT_IMAGE_KEYS
+    direct_value = _payload_text(payload, *keys)
+    if direct_value:
+        return direct_value
+    return _selected_image_url(payload, "nutrition" if image_type == "nutrition" else "front")
+
+
+def _openfoodfacts_product_url(code: str | None) -> str:
+    code_clean = str(code or "").strip()
+    return f"https://world.openfoodfacts.org/product/{code_clean}" if code_clean else ""
+
+
+def _build_corrected_payload(
+    *,
+    rejected: RejectedProductReview,
+    payload: dict,
+    product_name: str,
+    brands: str,
+    quantity: str,
+    categories: str,
+    categories_tags: str,
+    primary_category: str,
+    ingredients_text: str,
+    allergens_tags: str,
+    labels_tags: str,
+    nutrition_grade: str,
+    nutriscore_score: str,
+    nova_group: str,
+    image_url: str,
+    image_nutrition_url: str,
+    nutrient_values: dict[str, str],
+) -> dict:
+    corrected = dict(payload)
+    corrected["code"] = rejected.code_produit
+    corrected["product_name"] = product_name.strip()
+    corrected["brands"] = brands.strip() or None
+    corrected["quantity"] = quantity.strip() or None
+    corrected["categories"] = categories.strip()
+    corrected["categories_tags"] = _split_csv(categories_tags)
+    corrected["categorie_principale"] = primary_category.strip() or None
+    corrected["ingredients_text"] = ingredients_text.strip() or None
+    corrected["allergens_tags"] = _split_csv(allergens_tags)
+    corrected["labels_tags"] = _split_csv(labels_tags)
+    corrected["nutriscore_grade"] = nutrition_grade.strip().lower()[:1] or None
+    corrected["nutriscore_score"] = _parse_optional_int(nutriscore_score)
+    corrected["nova_group"] = _parse_optional_int(nova_group)
+    corrected["image_url"] = image_url.strip() or None
+    corrected["image_nutrition_url"] = image_nutrition_url.strip() or None
+    corrected["_manual_review"] = {
+        "rejected_id": rejected.rejected_id,
+        "reviewed_at": _utcnow().isoformat(),
+        "source": "streamlit_admin",
+    }
+
+    for nutrient_key, _, _ in _CORE_NUTRIENT_FIELDS:
+        corrected[nutrient_key] = _parse_optional_float(nutrient_values.get(nutrient_key, ""))
+
+    nutriments = corrected.get("nutriments")
+    if not isinstance(nutriments, dict):
+        nutriments = {}
+    nutrient_payload_keys = {
+        "energy_kcal_100g": ("energy-kcal_100g", "energy_kcal_100g"),
+        "fat_100g": ("fat_100g",),
+        "saturated_fat_100g": ("saturated-fat_100g", "saturated_fat_100g"),
+        "carbohydrates_100g": ("carbohydrates_100g",),
+        "sugars_100g": ("sugars_100g",),
+        "fiber_100g": ("fiber_100g",),
+        "proteins_100g": ("proteins_100g",),
+        "salt_100g": ("salt_100g",),
+    }
+    for nutrient_key, payload_keys in nutrient_payload_keys.items():
+        value = corrected.get(nutrient_key)
+        for payload_key in payload_keys:
+            nutriments[payload_key] = value
+    corrected["nutriments"] = nutriments
+
+    return corrected
+
+
+def _completion_report(payload: dict, min_core_nutrients: int | None = None) -> dict:
+    min_core_nutrients = min_core_nutrients or int(os.getenv("OPENFOOD_MIN_CORE_NUTRIENTS", "2"))
+    nutrient_count = _corrected_nutrient_count(payload)
+    checks = [
+        ("Code-barres", _is_filled(_payload_first(payload, "code", "code_produit"))),
+        ("Nom produit", _is_filled(_payload_first(payload, "product_name", "product_name_en", "product_name_fr"))),
+        ("Marque", _is_filled(_payload_first(payload, "brands", "brands_en", "brands_fr"))),
+        ("Catégorie", _is_filled(_payload_first(payload, "categories", "categories_tags", "categorie_principale"))),
+        ("Ingrédients", _is_filled(_payload_first(payload, "ingredients_text", "ingredients_text_en", "ingredients_text_fr"))),
+        (f"Nutrition ({min_core_nutrients}+ champs)", nutrient_count >= min_core_nutrients),
+        ("Image", bool(_payload_image_url(payload) or _payload_image_url(payload, "nutrition"))),
+    ]
+    done = sum(1 for _, ok in checks if ok)
+    total = len(checks)
+    return {
+        "done": done,
+        "total": total,
+        "percent": int(round((done / total) * 100)) if total else 0,
+        "missing": [label for label, ok in checks if not ok],
+        "nutrient_count": nutrient_count,
+    }
+
+
+def _render_pipeline_preview(payload: dict | None, error: str | None = None) -> None:
+    st.markdown("**Aperçu pipeline**")
+    if error:
+        st.warning(f"Non valide pour le pipeline: {error}")
+        return
+    if payload is None:
+        st.warning("Aperçu indisponible.")
+        return
+
+    issues = _validate_corrected_payload(payload)
+    completion = _completion_report(payload)
+    expected_grade = _grade_from_score(_payload_text(payload, "nutriscore_score"))
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Complétude", f"{completion['percent']}%")
+    c2.metric("Nutriments", completion["nutrient_count"])
+    c3.metric("NutriScore attendu", expected_grade.upper() if expected_grade else "N/A")
+
+    if issues:
+        st.warning("Non valide pour le pipeline.")
+        st.caption("Problèmes: " + ", ".join(_humanize_contract_issue(issue) for issue in issues))
+    else:
+        st.success("Valide pour le pipeline.")
+
+    if completion["missing"]:
+        st.caption("Champs incomplets: " + ", ".join(completion["missing"]))
+
+
+def _corrected_nutrient_count(payload: dict) -> int:
+    count = 0
+    for top_key, _, aliases in _CORE_NUTRIENT_FIELDS:
+        value = _nutrient_number(payload, top_key, aliases)
+        if value is not None:
+            count += 1
+    return count
+
+
+def _score_matches_grade(grade: str | None, score: int | None) -> bool:
+    if not grade and score is None:
+        return True
+    if not grade or score is None:
+        return False
+    grade_value = grade.strip().lower()[:1]
+    ranges = {
+        "a": (-15, -1),
+        "b": (0, 2),
+        "c": (3, 10),
+        "d": (11, 18),
+        "e": (19, 40),
+    }
+    if grade_value not in ranges:
+        return False
+    low, high = ranges[grade_value]
+    return low <= score <= high
+
+
+def _grade_from_score(score_value: str | int | float | None) -> str:
+    try:
+        score = _parse_optional_int(str(score_value or ""))
+    except ValueError:
+        return ""
+    if score is None:
+        return ""
+    if score <= -1:
+        return "a"
+    if score <= 2:
+        return "b"
+    if score <= 10:
+        return "c"
+    if score <= 18:
+        return "d"
+    return "e"
+
+
+def _normalize_grade_with_score(grade: str, score_value: str) -> str:
+    expected_grade = _grade_from_score(score_value)
+    if expected_grade:
+        return expected_grade
+    return str(grade or "").strip().lower()[:1]
+
+
+def _quantity_looks_standardized(quantity: str | None) -> bool:
+    text_value = str(quantity or "").strip()
+    if not text_value:
+        return True
+    return bool(re.match(r"^\d+(?:[.,]\d+)?\s*(g|kg|ml|l|cl|oz|lb)\b", text_value.lower()))
+
+
+def _url_looks_valid(value: str | None) -> bool:
+    text_value = str(value or "").strip()
+    if not text_value:
+        return True
+    return text_value.startswith(("http://", "https://"))
+
+
+def _validate_corrected_payload(payload: dict) -> list[str]:
+    issues: list[str] = []
+
+    if not _is_filled(_payload_first(payload, "code")):
+        issues.append("missing_code")
+    if not _is_filled(_payload_first(payload, "product_name")):
+        issues.append("missing_product_name")
+    if not _is_filled(_payload_first(payload, "categories")):
+        issues.append("missing_categories")
+    if not _is_filled(_payload_first(payload, "categorie_principale")):
+        issues.append("missing_categorie_principale")
+    if not _quantity_looks_standardized(_payload_text(payload, "quantity")):
+        issues.append("quantity_not_standardized")
+
+    try:
+        score = _parse_optional_int(_payload_text(payload, "nutriscore_score"))
+    except ValueError:
+        score = None
+        issues.append("nutriscore_inconsistent")
+    grade = _payload_text(payload, "nutriscore_grade")
+    if "nutriscore_inconsistent" not in issues and not _score_matches_grade(grade, score):
+        issues.append("nutriscore_inconsistent")
+
+    return issues
+
+
+def _humanize_contract_issue(issue: str) -> str:
+    labels = {
+        "missing_code": "Code-barres manquant",
+        "missing_product_name": "Nom produit manquant",
+        "missing_categories": "Catégorie manquante",
+        "missing_categorie_principale": "Catégorie principale manquante",
+        "quantity_not_standardized": "Quantité non standardisée",
+        "nutriscore_inconsistent": "NutriScore incohérent",
+    }
+    return labels.get(issue, issue)
+
+
+def _issue_list_contains(issues, target: str) -> bool:
+    if isinstance(issues, list):
+        return target in {str(issue) for issue in issues}
+    if isinstance(issues, str):
+        return target == issues or target in {part.strip() for part in issues.split(",")}
+    return False
+
+
+def _suggestion_tags(suggestion: ProductCategorySuggestion) -> list[str]:
+    tags = suggestion.suggested_categories_tags
+    if isinstance(tags, list):
+        clean_tags = [str(tag).strip() for tag in tags if _is_filled(tag)]
+        if clean_tags:
+            return clean_tags
+
+    suggested_categories = suggestion.suggested_categories or ""
+    first_category = suggested_categories.split(",")[0].strip()
+    tag = _tag_label_to_tag(first_category)
+    return [tag] if tag else []
+
+
+def _build_batch_corrected_payload(
+    rejected: RejectedProductReview,
+    suggestion: ProductCategorySuggestion,
+) -> dict:
+    payload = rejected.raw_payload if isinstance(rejected.raw_payload, dict) else {}
+    corrected = dict(payload)
+
+    suggested_categories = _payload_text(
+        {"value": suggestion.suggested_categories},
+        "value",
+    )
+    suggested_tags = _suggestion_tags(suggestion)
+    suggested_primary = _value_from_sources(
+        suggestion.suggested_categorie_principale,
+        suggested_categories.split(",")[0].strip().lower() if suggested_categories else "",
+    )
+
+    corrected["code"] = rejected.code_produit
+    corrected["product_name"] = _value_from_sources(
+        _payload_text(corrected, "product_name", "product_name_en", "product_name_fr"),
+        rejected.product_name,
+    )
+    corrected["brands"] = _value_from_sources(
+        _payload_text(corrected, "brands", "brands_en", "brands_fr"),
+        rejected.brands,
+    ) or None
+    corrected["categories"] = suggested_categories
+    corrected["categories_tags"] = suggested_tags
+    corrected["categorie_principale"] = suggested_primary or None
+
+    score_value = _payload_text(corrected, "nutriscore_score")
+    grade_value = _payload_text(corrected, "nutriscore_grade", "nutrition_grade_fr", "nutrition_grade")
+    corrected["nutriscore_grade"] = _normalize_grade_with_score(grade_value, score_value) or None
+    try:
+        corrected["nutriscore_score"] = _parse_optional_int(score_value)
+    except ValueError:
+        corrected["nutriscore_score"] = None
+
+    corrected["_manual_review"] = {
+        "rejected_id": rejected.rejected_id,
+        "reviewed_at": _utcnow().isoformat(),
+        "source": "streamlit_admin_batch",
+    }
+    return corrected
+
+
+def _get_batch_validation_candidates(
+    db,
+    confidence_threshold: float,
+    limit: int = 100,
+) -> list[tuple[RejectedProductReview, ProductCategorySuggestion, dict]]:
+    rows = (
+        db.execute(
+            select(RejectedProductReview, ProductCategorySuggestion)
+            .join(
+                ProductCategorySuggestion,
+                ProductCategorySuggestion.rejected_id == RejectedProductReview.rejected_id,
+            )
+            .where(
+                RejectedProductReview.review_status.in_(["pending", "suggested", "needs_review"]),
+                ProductCategorySuggestion.decision_status == "suggested",
+                ProductCategorySuggestion.suggestion_confidence >= confidence_threshold,
+            )
+            .order_by(
+                ProductCategorySuggestion.suggestion_confidence.desc(),
+                RejectedProductReview.created_at.asc(),
+            )
+            .limit(limit * 3)
+        )
+        .all()
+    )
+
+    candidates: list[tuple[RejectedProductReview, ProductCategorySuggestion, dict]] = []
+    for rejected, suggestion in rows:
+        if not _issue_list_contains(rejected.quality_issues, "missing_categories"):
+            continue
+        if not _is_filled(suggestion.suggested_categories):
+            continue
+
+        corrected_payload = _build_batch_corrected_payload(rejected, suggestion)
+        if _validate_corrected_payload(corrected_payload):
+            continue
+
+        candidates.append((rejected, suggestion, corrected_payload))
+        if len(candidates) >= limit:
+            break
+
+    return candidates
+
+
+def _batch_validation_diagnostics(db, confidence_threshold: float) -> dict[str, int]:
+    rows = (
+        db.execute(
+            select(RejectedProductReview, ProductCategorySuggestion)
+            .join(
+                ProductCategorySuggestion,
+                ProductCategorySuggestion.rejected_id == RejectedProductReview.rejected_id,
+            )
+            .where(ProductCategorySuggestion.suggestion_confidence >= confidence_threshold)
+        )
+        .all()
+    )
+
+    diagnostics = {
+        "suggestions_above_threshold": len(rows),
+        "not_actionable_status": 0,
+        "already_decided": 0,
+        "not_missing_categories": 0,
+        "empty_suggestion": 0,
+        "failed_validation": 0,
+        "eligible": 0,
+    }
+    actionable_statuses = {"pending", "suggested", "needs_review"}
+
+    for rejected, suggestion in rows:
+        if rejected.review_status not in actionable_statuses:
+            diagnostics["not_actionable_status"] += 1
+            continue
+        if suggestion.decision_status != "suggested":
+            diagnostics["already_decided"] += 1
+            continue
+        if not _issue_list_contains(rejected.quality_issues, "missing_categories"):
+            diagnostics["not_missing_categories"] += 1
+            continue
+        if not _is_filled(suggestion.suggested_categories):
+            diagnostics["empty_suggestion"] += 1
+            continue
+        if _validate_corrected_payload(_build_batch_corrected_payload(rejected, suggestion)):
+            diagnostics["failed_validation"] += 1
+            continue
+        diagnostics["eligible"] += 1
+
+    return diagnostics
+
+
+def _render_rejection_quality_analysis(db) -> None:
+    with st.expander("Analyse qualité des rejets"):
+        status_rows = db.execute(
+            select(RejectedProductReview.review_status, func.count())
+            .group_by(RejectedProductReview.review_status)
+            .order_by(func.count().desc())
+        ).all()
+        status_counts = {status or "N/A": int(count) for status, count in status_rows}
+        total_rejections = sum(status_counts.values())
+        actionable_count = sum(
+            status_counts.get(status, 0)
+            for status in ("pending", "suggested", "needs_review")
+        )
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total rejets suivis", total_rejections)
+        c2.metric("Actionnables", actionable_count)
+        c3.metric("Validées admin", status_counts.get("validated", 0))
+        c4.metric("Validées pipeline", status_counts.get("resolved", 0))
+
+        if total_rejections:
+            st.caption(
+                f"Taux pipeline: {(status_counts.get('resolved', 0) / total_rejections) * 100:.1f}% | "
+                f"Taux admin: {(status_counts.get('validated', 0) / total_rejections) * 100:.1f}%"
+            )
+
+        cause_counts: dict[str, int] = {}
+        issue_rows = db.execute(select(RejectedProductReview.quality_issues)).all()
+        for (issues,) in issue_rows:
+            if isinstance(issues, list):
+                for issue in issues:
+                    cause_counts[str(issue)] = cause_counts.get(str(issue), 0) + 1
+            elif isinstance(issues, str) and issues.strip():
+                for issue in issues.split(","):
+                    issue = issue.strip()
+                    if issue:
+                        cause_counts[issue] = cause_counts.get(issue, 0) + 1
+
+        col_status, col_causes = st.columns(2)
+        with col_status:
+            st.markdown("**Répartition des statuts**")
+            if status_counts:
+                st.dataframe(
+                    [{"Statut": status, "Nombre": count} for status, count in status_counts.items()],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("Aucun statut disponible.")
+
+        with col_causes:
+            st.markdown("**Top causes de rejet**")
+            top_causes = sorted(cause_counts.items(), key=lambda item: item[1], reverse=True)[:10]
+            if top_causes:
+                st.dataframe(
+                    [{"Cause": cause, "Nombre": count} for cause, count in top_causes],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("Aucune cause disponible.")
+
+        confidence_rows = db.execute(
+            select(
+                ProductCategorySuggestion.decision_status,
+                ProductCategorySuggestion.suggestion_confidence,
+            )
+            .where(ProductCategorySuggestion.suggestion_confidence.is_not(None))
+        ).all()
+        buckets = {
+            ">= 0.90": 0,
+            "0.80 - 0.89": 0,
+            "0.70 - 0.79": 0,
+            "< 0.70": 0,
+        }
+        decision_counts: dict[str, int] = {}
+        for decision_status, confidence in confidence_rows:
+            decision_counts[decision_status or "N/A"] = decision_counts.get(decision_status or "N/A", 0) + 1
+            value = float(confidence)
+            if value >= 0.90:
+                buckets[">= 0.90"] += 1
+            elif value >= 0.80:
+                buckets["0.80 - 0.89"] += 1
+            elif value >= 0.70:
+                buckets["0.70 - 0.79"] += 1
+            else:
+                buckets["< 0.70"] += 1
+
+        col_conf, col_decision = st.columns(2)
+        with col_conf:
+            st.markdown("**Suggestions par confiance**")
+            st.dataframe(
+                [{"Confiance": bucket, "Nombre": count} for bucket, count in buckets.items()],
+                use_container_width=True,
+                hide_index=True,
+            )
+        with col_decision:
+            st.markdown("**Décisions de suggestions**")
+            if decision_counts:
+                st.dataframe(
+                    [{"Décision": status, "Nombre": count} for status, count in decision_counts.items()],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("Aucune suggestion disponible.")
+
+
+def _render_recent_admin_activity(db) -> None:
+    with st.expander("Dernières actions admin"):
+        status_filter = st.selectbox(
+            "Afficher",
+            ["validated", "ignored", "resolved", "needs_review", "all"],
+            format_func=lambda value: {
+                "validated": "Corrections validées admin",
+                "ignored": "Produits ignorés",
+                "resolved": "Validés par le pipeline",
+                "needs_review": "À revoir",
+                "all": "Toutes les actions récentes",
+            }.get(value, value),
+            key="recent_admin_activity_filter",
+        )
+
+        query = (
+            select(RejectedProductReview, ProductCategorySuggestion)
+            .outerjoin(
+                ProductCategorySuggestion,
+                ProductCategorySuggestion.rejected_id == RejectedProductReview.rejected_id,
+            )
+            .order_by(RejectedProductReview.updated_at.desc(), RejectedProductReview.rejected_id.desc())
+            .limit(50)
+        )
+        if status_filter != "all":
+            query = (
+                select(RejectedProductReview, ProductCategorySuggestion)
+                .outerjoin(
+                    ProductCategorySuggestion,
+                    ProductCategorySuggestion.rejected_id == RejectedProductReview.rejected_id,
+                )
+                .where(RejectedProductReview.review_status == status_filter)
+                .order_by(RejectedProductReview.updated_at.desc(), RejectedProductReview.rejected_id.desc())
+                .limit(50)
+            )
+
+        rows = db.execute(query).all()
+        if not rows:
+            st.info("Aucune action récente pour ce filtre.")
+            return
+
+        table_rows = []
+        for rejected, suggestion in rows:
+            corrected_payload = rejected.corrected_payload if isinstance(rejected.corrected_payload, dict) else {}
+            categories = _payload_text(corrected_payload, "categories")
+            if not categories and suggestion:
+                categories = suggestion.suggested_categories or ""
+
+            table_rows.append(
+                {
+                    "Mis à jour": _format_datetime(rejected.updated_at),
+                    "Code": rejected.code_produit,
+                    "Produit": rejected.product_name or "N/A",
+                    "Statut": _humanize_review_status(rejected.review_status),
+                    "Catégorie": categories or "N/A",
+                    "Validé par": (suggestion.validated_by if suggestion and suggestion.validated_by else "N/A"),
+                    "Confiance": (
+                        f"{float(suggestion.suggestion_confidence):.2f}"
+                        if suggestion and suggestion.suggestion_confidence is not None
+                        else "N/A"
+                    ),
+                    "Source": (suggestion.suggestion_source if suggestion else "N/A"),
+                }
+            )
+
+        st.dataframe(table_rows, use_container_width=True, hide_index=True)
+
+
+def _render_pipeline_followup(db) -> None:
+    with st.expander("Suivi pipeline des corrections validées"):
+        rows = db.execute(
+            select(
+                RejectedProductReview.code_produit,
+                RejectedProductReview.product_name,
+                RejectedProductReview.updated_at,
+                Product.code_produit.label("loaded_code"),
+            )
+            .outerjoin(Product, Product.code_produit == RejectedProductReview.code_produit)
+            .where(RejectedProductReview.review_status == "validated")
+            .order_by(RejectedProductReview.updated_at.desc())
+            .limit(100)
+        ).all()
+
+        total_validated = len(rows)
+        already_loaded = sum(1 for row in rows if row.loaded_code)
+        waiting_pipeline = total_validated - already_loaded
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Validées admin", total_validated)
+        c2.metric("Déjà dans produit", already_loaded)
+        c3.metric("En attente pipeline", waiting_pipeline)
+
+        if not rows:
+            st.info("Aucune correction validée admin à suivre.")
+            return
+
+        table_rows = [
+            {
+                "Code": row.code_produit,
+                "Produit": row.product_name or "N/A",
+                "Statut pipeline": "Présent dans produit" if row.loaded_code else "En attente Airflow",
+                "Validé admin le": _format_datetime(row.updated_at),
+            }
+            for row in rows
+        ]
+        st.dataframe(table_rows, use_container_width=True, hide_index=True)
 
 
 # =========================
@@ -285,6 +1289,7 @@ def _show_admin_flash():
 # =========================
 def _products_list_ui():
     st.subheader("📦 Admin - Produits")
+    _show_admin_flash()
     nav1, nav2 = st.columns([1, 1])
     with nav1:
         st.button("📦 Produits", disabled=True, use_container_width=True)
@@ -344,6 +1349,10 @@ def _products_list_ui():
             .limit(per_page)
             .all()
         )
+        latest_reviews = _latest_pipeline_reviews_for_codes(
+            db,
+            [str(product.code_produit) for product in products],
+        )
 
         st.caption(f"Total: **{total}** | Pages: **{total_pages}** | Page: **{page}**")
 
@@ -357,13 +1366,15 @@ def _products_list_ui():
 
         for p in products:
             col1, col2, col3 = st.columns([3, 1, 1])
+            latest_review = latest_reviews.get(str(p.code_produit))
 
             with col1:
                 st.write(f"**{p.code_produit}** — {p.nom_produit or ''}")
                 st.caption(
                     f"Note nutritionnelle: {p.nutrition_grade or 'N/A'} | "
                     f"Groupe Nova: {p.nova_group or 'N/A'} | "
-                    f"Marque: {p.brands or 'N/A'}"
+                    f"Marque: {p.brands or 'N/A'} | "
+                    f"Pipeline: {_pipeline_status_label(latest_review)}"
                 )
 
             with col2:
@@ -409,8 +1420,8 @@ def _rejected_products_list_ui():
             "all": "Tous",
             "pending": "En attente",
             "suggested": "Suggestion disponible",
-            "validated": "Validé",
-            "resolved": "Résolu par le pipeline",
+            "validated": "Correction validée (admin)",
+            "resolved": "Validé par le pipeline",
             "ignored": "Ignoré",
             "needs_review": "À revoir",
         }
@@ -430,6 +1441,89 @@ def _rejected_products_list_ui():
 
     db = SessionLocal()
     try:
+        _ensure_rejected_review_schema(db)
+        status_counts = dict(
+            db.execute(
+                select(RejectedProductReview.review_status, func.count())
+                .group_by(RejectedProductReview.review_status)
+            ).all()
+        )
+        actionable_total = sum(
+            int(status_counts.get(status, 0))
+            for status in _ACTIONNABLE_STATUSES
+        )
+        m1, m2, m3 = st.columns(3)
+        m1.metric("À traiter", actionable_total)
+        m2.metric("Validées admin", int(status_counts.get("validated", 0)))
+        m3.metric("Validées pipeline", int(status_counts.get("resolved", 0)))
+
+        _render_rejection_quality_analysis(db)
+        _render_recent_admin_activity(db)
+        _render_pipeline_followup(db)
+
+        with st.expander("Validation par lot des suggestions fiables"):
+            b1, b2, b3 = st.columns([1, 1, 2])
+            with b1:
+                confidence_threshold = st.number_input(
+                    "Confiance minimale",
+                    min_value=0.50,
+                    max_value=1.00,
+                    value=0.85,
+                    step=0.01,
+                    format="%.2f",
+                )
+            candidates = _get_batch_validation_candidates(db, float(confidence_threshold), limit=100)
+            diagnostics = _batch_validation_diagnostics(db, float(confidence_threshold))
+            with b2:
+                st.metric("Candidats", len(candidates))
+            with b3:
+                st.caption(
+                    "Critères: statut actionnable, problème missing_categories, "
+                    "suggestion non vide, confiance suffisante, correction testée comme valide."
+                )
+
+            st.caption(
+                "Diagnostic seuil: "
+                f"{diagnostics['suggestions_above_threshold']} suggestion(s) au-dessus du seuil, "
+                f"{diagnostics['eligible']} éligible(s), "
+                f"{diagnostics['not_actionable_status']} déjà résolue(s)/ignorée(s)/validée(s), "
+                f"{diagnostics['already_decided']} déjà décidée(s), "
+                f"{diagnostics['not_missing_categories']} autre(s) problème(s), "
+                f"{diagnostics['failed_validation']} échoue(nt) au test."
+            )
+
+            if candidates:
+                preview = ", ".join(
+                    f"{rejected.code_produit} → {suggestion.suggested_categories}"
+                    for rejected, suggestion, _ in candidates[:5]
+                )
+                st.caption(f"Aperçu: {preview}")
+
+            if st.button(
+                f"Valider {len(candidates)} suggestion(s) fiable(s)",
+                disabled=not candidates,
+                type="primary",
+            ):
+                try:
+                    now = _utcnow()
+                    for rejected, suggestion, corrected_payload in candidates:
+                        rejected.corrected_payload = corrected_payload
+                        rejected.review_status = "validated"
+                        rejected.updated_at = now
+                        suggestion.decision_status = "validated"
+                        suggestion.validated_by = "auto_batch"
+                        suggestion.updated_at = now
+
+                    db.commit()
+                    st.session_state["admin_flash"] = {
+                        "level": "success",
+                        "message": f"{len(candidates)} suggestion(s) fiable(s) validée(s).",
+                    }
+                    st.rerun()
+                except SQLAlchemyError as e:
+                    db.rollback()
+                    st.error(f"Erreur validation par lot: {e}")
+
         query_db = db.query(RejectedProductReview)
 
         qn = (q or "").strip()
@@ -448,13 +1542,20 @@ def _rejected_products_list_ui():
         elif status_filter != "all":
             query_db = query_db.filter(RejectedProductReview.review_status == status_filter)
 
+        total_rejected_products = query_db.count()
         rejected_products = (
             query_db.order_by(RejectedProductReview.created_at.desc(), RejectedProductReview.rejected_id.desc())
             .limit(200)
             .all()
         )
 
-        st.caption(f"Résultats: **{len(rejected_products)}**")
+        if total_rejected_products > len(rejected_products):
+            st.caption(
+                f"Résultats: **{total_rejected_products}** "
+                f"({len(rejected_products)} affichés, limite 200)"
+            )
+        else:
+            st.caption(f"Résultats: **{total_rejected_products}**")
         st.divider()
 
         if not rejected_products:
@@ -463,21 +1564,26 @@ def _rejected_products_list_ui():
 
         for rejected in rejected_products:
             suggestion = _get_active_suggestion_for_code(db, rejected.code_produit)
-            col1, col2 = st.columns([4, 1])
+            raw_payload = rejected.raw_payload if isinstance(rejected.raw_payload, dict) else {}
+            corrected_payload = rejected.corrected_payload if isinstance(rejected.corrected_payload, dict) else {}
+            col1, col2 = st.columns([5, 1])
 
             with col1:
                 st.write(f"**{rejected.code_produit}** — {rejected.product_name or 'Sans nom'}")
-                st.caption(
-                    f"Marque: {rejected.brands or 'N/A'} | "
-                    f"Problèmes: {_format_issue_list(rejected.quality_issues) or 'N/A'} | "
-                    f"Statut: {_humanize_review_status(rejected.review_status)}"
-                )
+                summary_parts = [
+                    f"Problème: {_format_issue_list(rejected.quality_issues) or 'N/A'}",
+                    f"Statut: {_humanize_review_status(rejected.review_status)}",
+                ]
                 if suggestion:
-                    st.caption(
-                        f"Suggestion: {suggestion.suggested_categories or 'N/A'} | "
-                        f"Décision: {_humanize_suggestion_status(suggestion.decision_status)} | "
-                        f"Source: {suggestion.suggestion_source or 'N/A'}"
+                    confidence = (
+                        f"{float(suggestion.suggestion_confidence):.2f}"
+                        if suggestion.suggestion_confidence is not None
+                        else "N/A"
                     )
+                    summary_parts.append(f"Suggestion: {suggestion.suggested_categories or 'N/A'} ({confidence})")
+                if corrected_payload:
+                    summary_parts.append("Correction: oui")
+                st.caption(" | ".join(summary_parts))
 
             with col2:
                 if st.button("✏️ Revoir", key=f"reject_edit_{rejected.rejected_id}"):
@@ -568,6 +1674,7 @@ def _rejected_product_form_ui(rejected_id: int | None):
 
     db = SessionLocal()
     try:
+        _ensure_rejected_review_schema(db)
         rejected = (
             db.execute(
                 select(RejectedProductReview).where(RejectedProductReview.rejected_id == int(rejected_id))
@@ -586,6 +1693,7 @@ def _rejected_product_form_ui(rejected_id: int | None):
 
         suggestion = _get_active_suggestion_for_code(db, rejected.code_produit)
         payload = rejected.raw_payload if isinstance(rejected.raw_payload, dict) else {}
+        corrected_payload = rejected.corrected_payload if isinstance(rejected.corrected_payload, dict) else {}
         issues = rejected.quality_issues if isinstance(rejected.quality_issues, list) else []
 
         st.subheader(f"✏️ Revue de suggestion — {rejected.code_produit}")
@@ -604,10 +1712,46 @@ def _rejected_product_form_ui(rejected_id: int | None):
         source_categories = _payload_field_value(payload, "categories", "categories_old", "categories_en", "categories_fr")
         source_categories_tags = _payload_field_value(payload, "categories_tags")
         source_primary_category = _payload_field_value(payload, "categorie_principale", "pnns_groups_2", "pnns_groups_1")
+        source_quantity = _payload_text(payload, "quantity")
+        source_ingredients = _payload_text(payload, "ingredients_text", "ingredients_text_en", "ingredients_text_fr")
+        source_allergens = _payload_text(payload, "allergens_tags", "allergens")
+        source_labels = _payload_text(payload, "labels_tags", "labels")
+        source_image_url = _payload_image_url(payload)
+        source_image_nutrition_url = _payload_image_url(payload, "nutrition")
+        source_product_url = _payload_text(payload, "url") or _openfoodfacts_product_url(rejected.code_produit)
+        source_nutrition_grade = _payload_text(payload, "nutriscore_grade", "nutrition_grade_fr", "nutrition_grade")
+        source_nutriscore_score = _payload_text(payload, "nutriscore_score")
+        source_nutrition_grade = _normalize_grade_with_score(source_nutrition_grade, source_nutriscore_score)
+        source_nova_group = _payload_text(payload, "nova_group")
+        source_nutrient_values = {
+            nutrient_key: _format_optional_number(_nutrient_number(payload, nutrient_key, nutrient_aliases))
+            for nutrient_key, _, nutrient_aliases in _CORE_NUTRIENT_FIELDS
+        }
 
         generated_suggestions = _suggest_categories(db, payload, source_product_name or rejected.product_name)
         selected_preview = None
         manual_category_selection: list[str] = []
+        completion = _completion_report(corrected_payload or payload)
+
+        score_col, missing_col = st.columns([1, 3])
+        with score_col:
+            st.metric("Complétude", f"{completion['percent']}%")
+            st.progress(completion["percent"] / 100)
+        with missing_col:
+            if completion["missing"]:
+                st.caption("Champs à compléter: " + ", ".join(completion["missing"]))
+            else:
+                st.success("La fiche contient les champs essentiels.")
+
+        if source_image_url:
+            st.image(source_image_url, width=180)
+        else:
+            st.info(
+                "Aucune image produit n'est présente dans les données source. "
+                "Vous pouvez coller une URL d'image manuellement si vous en trouvez une."
+            )
+            if source_product_url:
+                st.caption(f"Page OpenFoodFacts possible: {source_product_url}")
 
         if suggestion is None and generated_suggestions:
             st.markdown("#### Suggestion automatique disponible")
@@ -661,21 +1805,43 @@ def _rejected_product_form_ui(rejected_id: int | None):
             if suggestion and suggestion.suggestion_confidence is not None
             else (selected_preview.get("confidence") if selected_preview else None)
         )
+        corrected_source = corrected_payload or {}
+        default_categories = (
+            _payload_text(corrected_source, "categories")
+            or source_categories
+            or current_suggested_categories
+            or (", ".join(manual_category_selection) if manual_category_selection else "")
+        )
+        default_categories_tags = (
+            _payload_text(corrected_source, "categories_tags")
+            or source_categories_tags
+            or current_suggested_tags
+            or _tag_label_to_tag(default_categories)
+        )
+        default_primary_category = (
+            _payload_text(corrected_source, "categorie_principale")
+            or source_primary_category
+            or current_suggested_primary
+            or default_categories.split(",")[0].strip().lower()
+        )
 
-        with st.form("rejected_product_correction_form", clear_on_submit=False):
+        with st.container():
             validated_by = st.text_input(
                 "Validé par",
                 value=(suggestion.validated_by if suggestion and suggestion.validated_by else ""),
             )
+            _field_hint("Nom ou initiales de la personne qui valide la correction.")
             st.markdown("**Produit source**")
             c1, c2 = st.columns(2)
             with c1:
                 st.text_input("Nom produit", value=source_product_name or rejected.product_name or "", disabled=True)
                 st.text_input("Marque", value=source_brands or rejected.brands or "", disabled=True)
+                st.text_input("Quantité", value=source_quantity, disabled=True)
                 st.text_area("Catégories actuelles", value=source_categories, height=70, disabled=True)
             with c2:
                 st.text_area("Tags actuels", value=source_categories_tags, height=70, disabled=True)
                 st.text_input("Catégorie principale actuelle", value=source_primary_category, disabled=True)
+                st.text_area("Ingrédients actuels", value=source_ingredients, height=70, disabled=True)
 
             st.markdown("**Suggestion système**")
             s1, s2 = st.columns(2)
@@ -707,6 +1873,156 @@ def _rejected_product_form_ui(rejected_id: int | None):
             if current_suggestion_confidence is not None:
                 st.metric("Confiance de la suggestion", f"{float(current_suggestion_confidence):.2f}")
 
+            st.markdown("**Correction à enregistrer**")
+            f1, f2 = st.columns(2)
+            with f1:
+                corr_product_name = st.text_input(
+                    "Nom corrigé",
+                    value=_value_from_sources(
+                        _payload_text(corrected_source, "product_name", "product_name_en", "product_name_fr"),
+                        source_product_name,
+                        rejected.product_name,
+                    ),
+                )
+                _field_hint("Nom lisible du produit, sans marque répétée si possible.")
+                corr_brands = st.text_input(
+                    "Marque corrigée",
+                    value=_value_from_sources(
+                        _payload_text(corrected_source, "brands", "brands_en", "brands_fr"),
+                        source_brands,
+                        rejected.brands,
+                    ),
+                )
+                _field_hint("Marque principale; séparer plusieurs marques par une virgule.")
+                corr_quantity = st.text_input(
+                    "Quantité corrigée",
+                    value=_value_from_sources(_payload_text(corrected_source, "quantity"), source_quantity),
+                )
+                _field_hint("Format attendu: 250 g, 1 l, 330 ml.")
+                corr_categories = st.text_area(
+                    "Catégories corrigées",
+                    value=default_categories,
+                    height=80,
+                    key=f"corr_categories_{rejected_id}",
+                )
+                _field_hint("Catégories texte, séparées par des virgules.")
+                corr_categories_tags = st.text_area(
+                    "Tags catégories corrigés",
+                    value=default_categories_tags,
+                    height=70,
+                    key=f"corr_categories_tags_{rejected_id}",
+                )
+                _field_hint("Tags OpenFoodFacts, exemple: en:snacks, en:beverages.")
+                corr_primary_category = st.text_input(
+                    "Catégorie principale corrigée",
+                    value=default_primary_category,
+                    key=f"corr_primary_category_{rejected_id}",
+                )
+                _field_hint("Une seule catégorie principale, généralement la première catégorie.")
+            with f2:
+                corr_ingredients = st.text_area(
+                    "Ingrédients corrigés",
+                    value=_value_from_sources(
+                        _payload_text(corrected_source, "ingredients_text", "ingredients_text_en", "ingredients_text_fr"),
+                        source_ingredients,
+                    ),
+                    height=90,
+                )
+                _field_hint("Texte d'ingrédients tel qu'affiché sur le produit.")
+                corr_allergens = st.text_area(
+                    "Allergènes corrigés",
+                    value=_value_from_sources(
+                        _payload_text(corrected_source, "allergens_tags", "allergens"),
+                        source_allergens,
+                    ),
+                    height=65,
+                )
+                _field_hint("Tags allergènes si connus, exemple: en:milk, en:soybeans.")
+                corr_labels = st.text_area(
+                    "Labels corrigés",
+                    value=_value_from_sources(_payload_text(corrected_source, "labels_tags", "labels"), source_labels),
+                    height=65,
+                )
+                _field_hint("Labels ou tags, exemple: en:organic, en:gluten-free.")
+                corr_image_url = st.text_input(
+                    "Image produit",
+                    value=_payload_image_url(corrected_source) or source_image_url,
+                    help="URL directe d'une image. Ce champ reste vide quand le JSON OpenFoodFacts local ne contient pas d'image.",
+                )
+                _field_hint("URL http(s) directe vers l'image produit.")
+                corr_image_nutrition_url = st.text_input(
+                    "Image nutrition",
+                    value=_payload_image_url(corrected_source, "nutrition") or source_image_nutrition_url,
+                    help="URL directe de l'image nutritionnelle si elle existe dans OpenFoodFacts ou si vous la renseignez manuellement.",
+                )
+                _field_hint("URL http(s) vers l'image du tableau nutritionnel.")
+
+            n1, n2, n3 = st.columns(3)
+            with n1:
+                default_nutriscore_score = _value_from_sources(
+                    _payload_text(corrected_source, "nutriscore_score"),
+                    source_nutriscore_score,
+                )
+                default_nutrition_grade = _normalize_grade_with_score(
+                    _value_from_sources(
+                        _payload_text(corrected_source, "nutriscore_grade", "nutrition_grade_fr", "nutrition_grade"),
+                        source_nutrition_grade,
+                    ),
+                    default_nutriscore_score,
+                )
+                corr_nutrition_grade = st.text_input(
+                    "NutriScore corrigé (A-E)",
+                    value=default_nutrition_grade,
+                )
+                _field_hint("Lettre entre A et E; elle sera ajustée si le score indique une autre lettre.")
+                corr_nutriscore_score = st.text_input(
+                    "Score NutriScore",
+                    value=default_nutriscore_score,
+                )
+                _field_hint("Nombre entier du score NutriScore.")
+                corr_nova_group = st.text_input(
+                    "NOVA",
+                    value=_value_from_sources(_payload_text(corrected_source, "nova_group"), source_nova_group),
+                )
+                _field_hint("Groupe NOVA entre 1 et 4.")
+            nutrient_inputs: dict[str, str] = {}
+            nutrient_columns = [n2, n3]
+            for idx, (nutrient_key, label, nutrient_aliases) in enumerate(_CORE_NUTRIENT_FIELDS):
+                with nutrient_columns[idx % len(nutrient_columns)]:
+                    nutrient_inputs[nutrient_key] = st.text_input(
+                        f"{label} /100g",
+                        value=_format_optional_number(
+                            _nutrient_number(corrected_source, nutrient_key, nutrient_aliases)
+                            if corrected_source
+                            else source_nutrient_values.get(nutrient_key)
+                        ),
+                    )
+                    _field_hint("Valeur numérique pour 100 g ou 100 ml.")
+
+            try:
+                preview_payload = _build_corrected_payload(
+                    rejected=rejected,
+                    payload=payload,
+                    product_name=corr_product_name,
+                    brands=corr_brands,
+                    quantity=corr_quantity,
+                    categories=corr_categories,
+                    categories_tags=corr_categories_tags,
+                    primary_category=corr_primary_category,
+                    ingredients_text=corr_ingredients,
+                    allergens_tags=corr_allergens,
+                    labels_tags=corr_labels,
+                    nutrition_grade=_normalize_grade_with_score(corr_nutrition_grade, corr_nutriscore_score),
+                    nutriscore_score=corr_nutriscore_score,
+                    nova_group=corr_nova_group,
+                    image_url=corr_image_url,
+                    image_nutrition_url=corr_image_nutrition_url,
+                    nutrient_values=nutrient_inputs,
+                )
+                _render_pipeline_preview(preview_payload)
+            except ValueError:
+                _render_pipeline_preview(None, "un champ numérique contient une valeur invalide.")
+
             _DECISION_LABELS = {
                 "validated": "Valider la suggestion",
                 "rejected": "Refuser la suggestion",
@@ -722,8 +2038,15 @@ def _rejected_product_form_ui(rejected_id: int | None):
                 ),
                 format_func=lambda v: _DECISION_LABELS.get(v, v),
             )
+            _field_hint("Valider envoie la correction au prochain pipeline.")
 
-            save = st.form_submit_button("Enregistrer la décision")
+            action_test, action_auto, action_save = st.columns([1, 1, 1])
+            with action_test:
+                test_clicked = st.button("Tester la correction", type="secondary", key=f"test_correction_{rejected_id}")
+            with action_auto:
+                validate_if_ok = st.button("Valider si test OK", type="primary", key=f"validate_if_ok_{rejected_id}")
+            with action_save:
+                save = st.button("Enregistrer la décision", key=f"save_decision_{rejected_id}")
 
         c1, c2 = st.columns(2)
         with c1:
@@ -731,52 +2054,145 @@ def _rejected_product_form_ui(rejected_id: int | None):
         with c2:
             back_clicked = st.button("⬅️ Retour à la liste des rejets")
 
-        if save:
+        def build_form_corrected_payload():
+            return _build_corrected_payload(
+                rejected=rejected,
+                payload=payload,
+                product_name=corr_product_name,
+                brands=corr_brands,
+                quantity=corr_quantity,
+                categories=corr_categories,
+                categories_tags=corr_categories_tags,
+                primary_category=corr_primary_category,
+                ingredients_text=corr_ingredients,
+                allergens_tags=corr_allergens,
+                labels_tags=corr_labels,
+                nutrition_grade=_normalize_grade_with_score(corr_nutrition_grade, corr_nutriscore_score),
+                nutriscore_score=corr_nutriscore_score,
+                nova_group=corr_nova_group,
+                image_url=corr_image_url,
+                image_nutrition_url=corr_image_nutrition_url,
+                nutrient_values=nutrient_inputs,
+            )
+
+        def save_form_decision(corrected_payload_to_save, force_validated: bool = False):
+            nonlocal suggestion
+            now = _utcnow()
+            selected_source = selected_preview
+
+            if selected_source is None and suggestion is None and manual_category_selection:
+                selected_source = {
+                    "source": "sélection manuelle admin",
+                    "categories": ", ".join(manual_category_selection),
+                    "categories_tags": None,
+                    "categorie_principale": manual_category_selection[0] if manual_category_selection else None,
+                    "confidence": 1.0,
+                }
+
+            if suggestion is None:
+                suggestion = ProductCategorySuggestion(
+                    rejected_id=rejected.rejected_id,
+                    code_produit=rejected.code_produit,
+                    suggestion_source=(selected_source["source"] if selected_source else "correction manuelle admin"),
+                    created_at=now,
+                )
+                db.add(suggestion)
+
+            suggestion.rejected_id = rejected.rejected_id
+            suggestion.code_produit = rejected.code_produit
+            suggestion.suggested_categories = corr_categories.strip() or None
+            suggestion.suggested_categories_tags = _split_csv(corr_categories_tags)
+            suggestion.suggested_categorie_principale = corr_primary_category.strip() or None
+            suggestion.suggestion_source = (
+                selected_source["source"]
+                if selected_source
+                else suggestion.suggestion_source
+                or "correction manuelle admin"
+            )
+            suggestion.suggestion_confidence = (
+                selected_source.get("confidence")
+                if selected_source
+                else suggestion.suggestion_confidence
+                or 1.0
+            )
+            suggestion.validated_by = validated_by.strip() or None
+            suggestion.decision_status = "validated" if force_validated else decision_status
+            suggestion.updated_at = now
+
+            rejected.corrected_payload = corrected_payload_to_save
+            if force_validated or decision_status == "validated":
+                rejected.review_status = "validated"
+            elif decision_status == "rejected":
+                rejected.review_status = "needs_review"
+            else:
+                rejected.review_status = "needs_review"
+            rejected.updated_at = now
+
+        if test_clicked:
             try:
-                now = _utcnow()
-                has_manual = bool(manual_category_selection)
-                if suggestion is None and selected_preview is None and not has_manual:
-                    st.error("Aucune catégorie sélectionnée. Choisissez au moins une catégorie dans la liste.")
+                corrected_payload_to_test = build_form_corrected_payload()
+                test_issues = _validate_corrected_payload(corrected_payload_to_test)
+                test_completion = _completion_report(corrected_payload_to_test)
+                if test_issues:
+                    st.error("Correction encore non valide pour le pipeline.")
+                    st.write("Problèmes restants:")
+                    for issue in test_issues:
+                        st.write(f"- {_humanize_contract_issue(issue)}")
+                else:
+                    st.success("Correction valide: le produit devrait pouvoir être repris par le pipeline.")
+                st.caption(
+                    f"Complétude simulée: {test_completion['percent']}% | "
+                    f"Nutriments renseignés: {_corrected_nutrient_count(corrected_payload_to_test)}"
+                )
+            except ValueError as e:
+                st.error(f"Valeur numérique invalide dans la correction: {e}")
+            except Exception as e:
+                st.error(f"Erreur pendant le test de correction: {e}")
+
+        if validate_if_ok:
+            try:
+                corrected_payload_to_save = build_form_corrected_payload()
+                test_issues = _validate_corrected_payload(corrected_payload_to_save)
+                if test_issues:
+                    st.error("Correction non enregistrée: le test échoue encore.")
+                    st.write("Problèmes restants:")
+                    for issue in test_issues:
+                        st.write(f"- {_humanize_contract_issue(issue)}")
                     st.stop()
 
-                if suggestion is None and selected_preview is None and has_manual:
-                    selected_preview = {
-                        "source": "sélection manuelle admin",
-                        "categories": ", ".join(manual_category_selection),
-                        "categories_tags": None,
-                        "categorie_principale": manual_category_selection[0] if manual_category_selection else None,
-                        "confidence": 1.0,
-                    }
+                save_form_decision(corrected_payload_to_save, force_validated=True)
+                db.commit()
+                st.session_state["admin_flash"] = {
+                    "level": "success",
+                    "message": f"Correction testée et validée pour le produit {rejected.code_produit}.",
+                }
+                st.session_state["admin_mode"] = "reject_list"
+                st.session_state.pop("admin_rejected_id", None)
+                st.rerun()
+            except SQLAlchemyError as e:
+                db.rollback()
+                st.error(f"Erreur validation automatique: {e}")
+            except Exception as e:
+                db.rollback()
+                st.error(f"Erreur inattendue validation automatique: {e}")
 
-                if suggestion is None:
-                    suggestion = ProductCategorySuggestion(
-                        rejected_id=rejected.rejected_id,
-                        code_produit=rejected.code_produit,
-                        suggestion_source=selected_preview["source"],
-                        created_at=now,
-                    )
-                    db.add(suggestion)
+        if save:
+            try:
+                if decision_status == "validated" and not corr_product_name.strip():
+                    st.error("Le nom produit est obligatoire pour valider la correction.")
+                    st.stop()
 
-                if selected_preview is not None:
-                    suggestion.suggested_categories = selected_preview["categories"]
-                    suggestion.suggested_categories_tags = selected_preview.get("categories_tags")
-                    suggestion.suggested_categorie_principale = selected_preview.get("categorie_principale")
-                    suggestion.suggestion_source = selected_preview["source"]
-                    suggestion.suggestion_confidence = selected_preview.get("confidence")
+                if decision_status == "validated" and not corr_categories.strip():
+                    st.error("Au moins une catégorie est obligatoire pour valider la correction.")
+                    st.stop()
 
-                suggestion.rejected_id = rejected.rejected_id
-                suggestion.code_produit = rejected.code_produit
-                suggestion.validated_by = validated_by.strip() or None
-                suggestion.decision_status = decision_status
-                suggestion.updated_at = now
+                if selected_preview is not None and not corr_categories.strip():
+                    corr_categories = selected_preview["categories"]
+                    corr_categories_tags = ", ".join(selected_preview.get("categories_tags") or [])
+                    corr_primary_category = selected_preview.get("categorie_principale") or corr_primary_category
 
-                if decision_status == "validated":
-                    rejected.review_status = "validated"
-                elif decision_status == "rejected":
-                    rejected.review_status = "needs_review"
-                else:
-                    rejected.review_status = "needs_review"
-                rejected.updated_at = now
+                corrected_payload_to_save = build_form_corrected_payload()
+                save_form_decision(corrected_payload_to_save)
 
                 db.commit()
                 st.session_state["admin_flash"] = {
@@ -859,64 +2275,188 @@ def _product_form_ui(is_edit: bool, code: str | None = None):
                 db,
                 str(p.code_produit)
             )
+        nutrition = _get_nutrition_for_product(db, str(p.code_produit)) if p else None
 
         st.subheader("✏️ Modifier un produit" if is_edit else "➕ Ajouter un produit")
+        st.info("Les changements sont enregistrés comme corrections validées admin. Ils seront intégrés au catalogue par le pipeline.")
+        _show_admin_flash()
+        if is_edit and p:
+            history = _product_correction_history(db, str(p.code_produit))
+            if history:
+                latest_review = history[0]
+                st.caption(
+                    f"Pipeline: {_pipeline_status_label(latest_review)} | "
+                    f"Derniere action: {_format_datetime(latest_review.updated_at)}"
+                )
+                with st.expander("Historique corrections admin"):
+                    history_rows = [
+                        {
+                            "Date": _format_datetime(review.updated_at),
+                            "Origine": _humanize_admin_source(review.source_task),
+                            "Statut": _humanize_review_status(review.review_status),
+                            "Problemes": _format_issue_list(review.quality_issues) or "-",
+                        }
+                        for review in history
+                    ]
+                    st.dataframe(history_rows, use_container_width=True, hide_index=True)
 
-        with st.form("product_form", clear_on_submit=False):
+        with st.container():
             code_val = st.text_input(
                 "Code produit",
                 value=(str(p.code_produit) if p else ""),
                 disabled=is_edit,
             )
+            _field_hint("Code-barres numérique, sans espace ni tiret.")
 
             name_val = st.text_input(
                 "Nom produit",
                 value=((p.nom_produit or "") if p else "")
             )
+            _field_hint("Nom lisible du produit tel qu'il doit apparaître dans le catalogue.")
+
+            quantity_val = st.text_input(
+                "Quantité",
+                value=((p.quantite or "") if p else "")
+            )
+            _field_hint("Format attendu: 250 g, 1 l, 330 ml.")
 
             grade_val = st.text_input(
                 "Note nutritionnelle (A-E)",
                 value=((p.nutrition_grade or "") if p else "")
             )
+            _field_hint("Lettre entre A et E; elle sera ajustée si le score indique une autre lettre.")
 
             nutri_score_val = st.text_input(
                 "Score Nutriscore (entier)",
                 value=(str(p.nutriscore_score) if p and p.nutriscore_score is not None else ""),
             )
+            _field_hint("Nombre entier du score NutriScore.")
 
             nova_val = st.text_input(
                 "Groupe Nova (entier)",
                 value=(str(p.nova_group) if p and p.nova_group is not None else ""),
             )
+            _field_hint("Groupe NOVA entre 1 et 4.")
 
             url_val = st.text_input(
                 "URL",
                 value=((p.url or "") if p else "")
             )
+            _field_hint("Lien http(s) vers la fiche produit si disponible.")
 
             image_url_val = st.text_input(
                 "URL de l'image",
                 value=((p.image_url or "") if p else "")
             )
+            _field_hint("Lien http(s) direct vers l'image produit.")
 
             marque_nom = st.text_input(
                 "Marque",
                 value=((p.brands or "") if p else "")
             )
+            _field_hint("Marque principale; séparer plusieurs marques par une virgule.")
 
             selected_categories_labels = st.multiselect(
                 "Catégories",
                 options=category_labels,
                 default=selected_categories_default,
             )
+            _field_hint("Choisir au moins une catégorie; la première devient la catégorie principale.")
 
             ingredients_txt = st.text_area(
                 "Ingrédients (séparés par , ou |)",
                 value=((p.ingredients_text or "") if p else ""),
                 height=80,
             )
+            _field_hint("Liste d'ingrédients, séparée par virgule ou barre verticale.")
 
-            ok = st.form_submit_button("Enregistrer")
+            st.markdown("**Valeurs nutritionnelles /100g**")
+            n1, n2, n3 = st.columns(3)
+            with n1:
+                energy_kcal_val = st.text_input(
+                    "Énergie kcal",
+                    value=_format_optional_number(nutrition.energy_kcal_100g if nutrition else None),
+                )
+                _field_hint("Valeur énergétique en kcal pour 100 g ou 100 ml.")
+                fat_val = st.text_input(
+                    "Matières grasses",
+                    value=_format_optional_number(nutrition.fat_100g if nutrition else None),
+                )
+                _field_hint("Grammes de matières grasses pour 100 g ou 100 ml.")
+                saturated_fat_val = st.text_input(
+                    "Graisses saturées",
+                    value=_format_optional_number(nutrition.saturated_fat_100g if nutrition else None),
+                )
+                _field_hint("Grammes de graisses saturées pour 100 g ou 100 ml.")
+            with n2:
+                carbohydrates_val = st.text_input(
+                    "Glucides",
+                    value=_format_optional_number(nutrition.carbohydrates_100g if nutrition else None),
+                )
+                _field_hint("Grammes de glucides pour 100 g ou 100 ml.")
+                sugars_val = st.text_input(
+                    "Sucres",
+                    value=_format_optional_number(nutrition.sugars_100g if nutrition else None),
+                )
+                _field_hint("Grammes de sucres pour 100 g ou 100 ml.")
+                fiber_val = st.text_input(
+                    "Fibres",
+                    value=_format_optional_number(nutrition.fiber_100g if nutrition else None),
+                )
+                _field_hint("Grammes de fibres pour 100 g ou 100 ml.")
+            with n3:
+                proteins_val = st.text_input(
+                    "Protéines",
+                    value=_format_optional_number(nutrition.proteins_100g if nutrition else None),
+                )
+                _field_hint("Grammes de protéines pour 100 g ou 100 ml.")
+                salt_val = st.text_input(
+                    "Sel",
+                    value=_format_optional_number(nutrition.salt_100g if nutrition else None),
+                )
+                _field_hint("Grammes de sel pour 100 g ou 100 ml.")
+
+            preview_nutrient_values = {
+                "energy_kcal_100g": energy_kcal_val,
+                "fat_100g": fat_val,
+                "saturated_fat_100g": saturated_fat_val,
+                "carbohydrates_100g": carbohydrates_val,
+                "sugars_100g": sugars_val,
+                "fiber_100g": fiber_val,
+                "proteins_100g": proteins_val,
+                "salt_100g": salt_val,
+            }
+            try:
+                preview_score = _parse_optional_int(nutri_score_val)
+                preview_nova = _parse_optional_int(nova_val)
+                preview_grade = _normalize_grade_with_score(grade_val.strip().lower()[:1], nutri_score_val)
+                preview_payload = _build_manual_product_payload(
+                    code=code_val.strip(),
+                    name=name_val,
+                    brand=marque_nom,
+                    quantity=quantity_val,
+                    categories=selected_categories_labels,
+                    ingredients=ingredients_txt,
+                    grade=preview_grade,
+                    nutri_score=preview_score,
+                    nova=preview_nova,
+                    url=url_val,
+                    image_url=image_url_val,
+                    nutrient_values=preview_nutrient_values,
+                )
+                _render_pipeline_preview(preview_payload)
+            except ValueError:
+                _render_pipeline_preview(None, "un champ numérique contient une valeur invalide.")
+
+            with st.expander("Résumé avant enregistrement"):
+                st.write(f"**Code**: {code_val or 'N/A'}")
+                st.write(f"**Nom**: {name_val or 'N/A'}")
+                st.write(f"**Quantité**: {quantity_val or 'N/A'}")
+                st.write(f"**Marque**: {marque_nom or 'N/A'}")
+                st.write(f"**Catégories**: {', '.join(selected_categories_labels) or 'N/A'}")
+                st.write(f"**NutriScore / NOVA**: {grade_val or 'N/A'} / {nova_val or 'N/A'}")
+
+            ok = st.button("Enregistrer", type="primary", key=f"save_product_{'edit' if is_edit else 'new'}_{code or 'new'}")
 
         if ok:
             try:
@@ -929,37 +2469,142 @@ def _product_form_ui(is_edit: bool, code: str | None = None):
                     return
 
                 code_clean = code_val.strip()
+                if not code_clean.isdigit():
+                    st.error("Le code produit doit contenir uniquement des chiffres.")
+                    return
+
+                grade_clean = grade_val.strip().lower()[:1]
+                if grade_clean and grade_clean not in {"a", "b", "c", "d", "e"}:
+                    st.error("La note nutritionnelle doit être comprise entre A et E.")
+                    return
+
+                nutri_score_clean = _parse_optional_int(nutri_score_val)
+                if grade_clean and nutri_score_clean is not None:
+                    grade_clean = _normalize_grade_with_score(grade_clean, nutri_score_clean)
+
+                nova_clean = _parse_optional_int(nova_val)
+                if nova_clean is not None and nova_clean not in {1, 2, 3, 4}:
+                    st.error("Le groupe NOVA doit être entre 1 et 4.")
+                    return
+
+                if not _quantity_looks_standardized(quantity_val):
+                    st.error("La quantité doit être standardisée, par exemple 250 g ou 1 l.")
+                    return
+
+                if not _url_looks_valid(url_val):
+                    st.error("L'URL produit doit commencer par http:// ou https://.")
+                    return
+
+                if not _url_looks_valid(image_url_val):
+                    st.error("L'URL image doit commencer par http:// ou https://.")
+                    return
+
+                nutrient_values = {
+                    "energy_kcal_100g": energy_kcal_val,
+                    "fat_100g": fat_val,
+                    "saturated_fat_100g": saturated_fat_val,
+                    "carbohydrates_100g": carbohydrates_val,
+                    "sugars_100g": sugars_val,
+                    "fiber_100g": fiber_val,
+                    "proteins_100g": proteins_val,
+                    "salt_100g": salt_val,
+                }
+                parsed_nutrients = {
+                    key: _parse_optional_float(value)
+                    for key, value in nutrient_values.items()
+                }
+                for key, value in parsed_nutrients.items():
+                    if value is not None and value < 0:
+                        st.error("Les valeurs nutritionnelles ne peuvent pas être négatives.")
+                        return
 
                 if not is_edit:
                     exists = db.query(Product).filter(Product.code_produit == code_clean).first()
                     if exists:
-                        st.error("Ce code produit existe déjà.")
+                        st.session_state["admin_flash"] = {
+                            "level": "warning",
+                            "message": "Ce code existe déjà. Ouverture du produit en modification.",
+                        }
+                        st.session_state["admin_mode"] = "edit"
+                        st.session_state["admin_code"] = code_clean
+                        st.rerun()
                         return
 
-                    p = Product(code_produit=code_clean)
-                    db.add(p)
+                    manual_payload = _build_manual_product_payload(
+                        code=code_clean,
+                        name=name_val,
+                        brand=marque_nom,
+                        quantity=quantity_val,
+                        categories=selected_categories_labels,
+                        ingredients=ingredients_txt,
+                        grade=grade_clean,
+                        nutri_score=nutri_score_clean,
+                        nova=nova_clean,
+                        url=url_val,
+                        image_url=image_url_val,
+                        nutrient_values=nutrient_values,
+                    )
+                    validation_issues = _validate_corrected_payload(manual_payload)
+                    if validation_issues:
+                        st.error("Le produit ne peut pas être envoyé au pipeline.")
+                        for issue in validation_issues:
+                            st.write(f"- {_humanize_contract_issue(issue)}")
+                        return
 
-                p.nom_produit = name_val.strip()
-                p.nutrition_grade = (grade_val.strip()[:1].upper() if grade_val.strip() else None)
-                p.nutriscore_score = (int(nutri_score_val) if nutri_score_val.strip() else None)
-                p.nova_group = (int(nova_val) if nova_val.strip() else None)
-                p.url = (url_val.strip() or None)
-                p.image_url = (image_url_val.strip() or None)
+                    _upsert_admin_product_pipeline_submission(
+                        db,
+                        code=code_clean,
+                        name=name_val,
+                        brand=marque_nom,
+                        corrected_payload=manual_payload,
+                        source_task="streamlit_manual_add",
+                        quality_issues=[],
+                    )
+                    db.commit()
+                    st.session_state["admin_flash"] = {
+                        "level": "success",
+                        "message": "Produit soumis au pipeline comme correction validée admin.",
+                    }
+                    st.session_state["admin_mode"] = "reject_list"
+                    st.rerun()
 
-                m = _get_or_create_marque(db, marque_nom)
-                p.id_marque = (m.id_marque if m else None)
+                edit_payload = _build_manual_product_payload(
+                    code=code_clean,
+                    name=name_val,
+                    brand=marque_nom,
+                    quantity=quantity_val,
+                    categories=selected_categories_labels,
+                    ingredients=ingredients_txt,
+                    grade=grade_clean,
+                    nutri_score=nutri_score_clean,
+                    nova=nova_clean,
+                    url=url_val,
+                    image_url=image_url_val,
+                    nutrient_values=nutrient_values,
+                )
+                edit_payload["_manual_review"]["source"] = "streamlit_admin_product_edit"
+                validation_issues = _validate_corrected_payload(edit_payload)
+                if validation_issues:
+                    st.error("La modification ne peut pas être envoyée au pipeline.")
+                    for issue in validation_issues:
+                        st.write(f"- {_humanize_contract_issue(issue)}")
+                    return
 
-                db.flush()
-
-                cats = [category_map[label] for label in selected_categories_labels]
-                ings = _get_or_create_ingredients(db, ingredients_txt)
-
-                _replace_product_categories(db, str(p.code_produit), cats)
-                _replace_product_ingredients(db, str(p.code_produit), ings)
-
+                _upsert_admin_product_pipeline_submission(
+                    db,
+                    code=code_clean,
+                    name=name_val,
+                    brand=marque_nom,
+                    corrected_payload=edit_payload,
+                    source_task="streamlit_product_edit",
+                    quality_issues=[],
+                )
                 db.commit()
-                st.success("✅ Enregistré.")
-                st.session_state["admin_mode"] = "list"
+                st.session_state["admin_flash"] = {
+                    "level": "success",
+                    "message": "Modification soumise au pipeline comme correction validée admin.",
+                }
+                st.session_state["admin_mode"] = "reject_list"
                 st.session_state.pop("admin_code", None)
                 st.rerun()
 
@@ -1007,39 +2652,18 @@ def _delete_ui(code: str | None):
             st.rerun()
             return
 
-        st.warning("Cette action est irréversible.")
+        st.warning("La suppression directe est désactivée.")
+        st.info("Pour respecter le flux projet, une suppression devra passer par une étape pipeline dédiée avant d'être appliquée au catalogue.")
 
         c1, c2 = st.columns(2)
-
         with c1:
-            if st.button("✅ Confirmer suppression"):
-                try:
-                    db.execute(
-                        delete(produit_categorie).where(produit_categorie.c.code_produit == code_clean)
-                    )
-
-                    db.execute(
-                        delete(produit_ingredient).where(produit_ingredient.c.code_produit == code_clean)
-                    )
-
-                    db.delete(p)
-                    db.commit()
-
-                    st.success("Supprimé ✅")
-                    st.session_state["admin_mode"] = "list"
-                    st.session_state.pop("admin_code", None)
-                    st.rerun()
-
-                except SQLAlchemyError as e:
-                    db.rollback()
-                    st.error(f"Erreur suppression: {e}")
-
-                except Exception as e:
-                    db.rollback()
-                    st.error(f"Erreur inattendue suppression: {e}")
+            if st.button("✏️ Modifier plutôt"):
+                st.session_state["admin_mode"] = "edit"
+                st.session_state["admin_code"] = code_clean
+                st.rerun()
 
         with c2:
-            if st.button("❌ Annuler"):
+            if st.button("⬅️ Retour"):
                 st.session_state["admin_mode"] = "list"
                 st.session_state.pop("admin_code", None)
                 st.rerun()

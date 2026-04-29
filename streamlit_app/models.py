@@ -97,6 +97,7 @@ class RejectedProductReview(Base):
     product_name = Column(Text)
     brands = Column(Text)
     raw_payload = Column(JSONB, nullable=False)
+    corrected_payload = Column(JSONB)
     quality_issues = Column(JSONB, nullable=False)
     source_run_id = Column(Text)
     source_task = Column(Text)
