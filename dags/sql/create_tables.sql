@@ -140,6 +140,7 @@ CREATE TABLE IF NOT EXISTS rejected_products_review (
     product_name TEXT,
     brands TEXT,
     raw_payload JSONB NOT NULL,
+    corrected_payload JSONB,
     quality_issues JSONB NOT NULL,
     source_run_id TEXT,
     source_task TEXT,
@@ -149,6 +150,9 @@ CREATE TABLE IF NOT EXISTS rejected_products_review (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE rejected_products_review
+ADD COLUMN IF NOT EXISTS corrected_payload JSONB;
 
 ALTER TABLE rejected_products_review
 DROP CONSTRAINT IF EXISTS rejected_products_review_review_status_check;

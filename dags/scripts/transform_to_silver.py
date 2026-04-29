@@ -190,6 +190,7 @@ def ensure_manual_review_tables(conn) -> None:
             product_name TEXT,
             brands TEXT,
             raw_payload JSONB NOT NULL,
+            corrected_payload JSONB,
             quality_issues JSONB NOT NULL,
             source_run_id TEXT,
             source_task TEXT,
@@ -199,6 +200,9 @@ def ensure_manual_review_tables(conn) -> None:
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+
+        ALTER TABLE rejected_products_review
+        ADD COLUMN IF NOT EXISTS corrected_payload JSONB;
 
         ALTER TABLE rejected_products_review
         DROP CONSTRAINT IF EXISTS rejected_products_review_review_status_check;
@@ -1197,6 +1201,75 @@ def apply_validated_category_suggestion(
     return merged, applied
 
 
+def load_validated_product_corrections() -> dict[str, dict[str, Any]]:
+    query = """
+        SELECT code_produit, corrected_payload
+        FROM rejected_products_review
+        WHERE review_status IN ('validated', 'resolved')
+          AND corrected_payload IS NOT NULL
+        ORDER BY updated_at DESC, rejected_id DESC
+    """
+
+    corrections: dict[str, dict[str, Any]] = {}
+    conn = get_pg_connection()
+    try:
+        ensure_manual_review_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute(query)
+            for code_value, corrected_payload in cur.fetchall():
+                code = normalize_code(code_value)
+                if code is None or code in corrections or not isinstance(corrected_payload, dict):
+                    continue
+                corrections[code] = corrected_payload
+    finally:
+        conn.close()
+
+    return corrections
+
+
+def load_validated_manual_product_submissions() -> dict[str, dict[str, Any]]:
+    query = """
+        SELECT code_produit, corrected_payload
+        FROM rejected_products_review
+        WHERE review_status IN ('validated', 'resolved')
+          AND source_task IN ('streamlit_manual_add', 'streamlit_product_edit')
+          AND corrected_payload IS NOT NULL
+        ORDER BY updated_at DESC, rejected_id DESC
+    """
+
+    submissions: dict[str, dict[str, Any]] = {}
+    conn = get_pg_connection()
+    try:
+        ensure_manual_review_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute(query)
+            for code_value, corrected_payload in cur.fetchall():
+                code = normalize_code(code_value)
+                if code is None or code in submissions or not isinstance(corrected_payload, dict):
+                    continue
+                submissions[code] = corrected_payload
+    finally:
+        conn.close()
+
+    return submissions
+
+
+def apply_validated_product_correction(
+    product: dict[str, Any],
+    correction: dict[str, Any] | None,
+    stats: dict[str, int] | None = None,
+) -> tuple[dict[str, Any], bool]:
+    if not correction:
+        return product, False
+
+    merged = dict(product)
+    merged.update(correction)
+    merged["_manual_review_applied"] = True
+    if stats is not None:
+        stats["manual_product_corrections_applied"] = stats.get("manual_product_corrections_applied", 0) + 1
+    return merged, True
+
+
 def upsert_category_suggestion(
     cur,
     *,
@@ -1342,7 +1415,10 @@ def upsert_rejected_product_reviews(
                 existing = cur.fetchone()
                 if existing and existing[1] != "resolved":
                     existing_status = existing[1]
-                    next_status = existing_status if existing_status == "ignored" and target_status == "pending" else target_status
+                    if existing_status in {"ignored", "validated"}:
+                        next_status = existing_status
+                    else:
+                        next_status = target_status
                     cur.execute(
                         update_sql,
                         (

@@ -14,6 +14,7 @@ if SCRIPTS_DIR not in sys.path:
 
 from transform_to_silver import (
     OUTPUT_COLUMNS,
+    apply_validated_product_correction,
     apply_validated_category_suggestion,
     build_row,
     evaluate_final_contract,
@@ -22,6 +23,8 @@ from transform_to_silver import (
     iter_json_lines,
     load_validated_category_suggestions,
     load_normalization_rules,
+    load_validated_manual_product_submissions,
+    load_validated_product_corrections,
     normalize_code,
     resolve_rejected_product_reviews,
     update_category_suggestion_status,
@@ -71,6 +74,8 @@ def init_second_clean_stats() -> dict[str, int]:
         "salt_sodium_inconsistent": 0,
         "category_suggestions_loaded": 0,
         "category_suggestions_applied": 0,
+        "manual_product_corrections_loaded": 0,
+        "manual_product_corrections_applied": 0,
         "suggested_primary_category_overrides": 0,
     }
 
@@ -92,12 +97,16 @@ def second_clean_from_bad(
     s3 = get_s3_client()
     rules, rules_source = load_normalization_rules()
     category_suggestions = load_validated_category_suggestions()
+    product_corrections = load_validated_product_corrections()
+    manual_submissions = load_validated_manual_product_submissions()
     obj = s3.get_object(Bucket=input_bucket, Key=input_key)
     source_run_id = os.getenv("AIRFLOW_CTX_DAG_RUN_ID")
     import_type = infer_import_type()
 
     stats = init_second_clean_stats()
     stats["category_suggestions_loaded"] = len(category_suggestions)
+    stats["manual_product_corrections_loaded"] = len(product_corrections)
+    stats["manual_product_submissions_loaded"] = len(manual_submissions)
     transform_stats = {
         "energy_imputed": 0,
         "energy_corrected": 0,
@@ -114,6 +123,7 @@ def second_clean_from_bad(
         "primary_category_from_categories": 0,
         "primary_category_default": 0,
         "category_suggestions_applied": 0,
+        "manual_product_corrections_applied": 0,
         "suggested_primary_category_overrides": 0,
         "rule_replacements": 0,
         "rule_filtered": 0,
@@ -155,9 +165,14 @@ def second_clean_from_bad(
 
                 stats["rows_input"] += 1
                 code = normalize_code(product.get("code"))
+                product_after_manual_correction, manual_correction_applied = apply_validated_product_correction(
+                    product,
+                    product_corrections.get(code) if code is not None else None,
+                    stats=transform_stats,
+                )
                 suggestion = category_suggestions.get(code) if code is not None else None
                 corrected_product, suggestion_applied = apply_validated_category_suggestion(
-                    product,
+                    product_after_manual_correction,
                     suggestion,
                     stats=transform_stats,
                 )
@@ -196,6 +211,8 @@ def second_clean_from_bad(
                 if row.get("code"):
                     recovered_codes.add(str(row["code"]))
                     if suggestion_applied:
+                        recovered_suggested_codes.add(str(row["code"]))
+                    if manual_correction_applied:
                         recovered_suggested_codes.add(str(row["code"]))
                 if len(rows_batch) >= chunk_size:
                     writer = write_rows_chunk(writer, rows_batch, recovered_path)
