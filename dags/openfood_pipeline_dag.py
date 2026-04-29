@@ -22,6 +22,7 @@ if DAGS_PATH not in sys.path:
 from scripts.extract_off_exports import extract_official_exports
 from scripts.first_clean_from_bronze import first_clean_from_bronze
 from scripts.build_similarity import build_similarity_recommendations
+from scripts.generate_ingredient_synonyms import generate_ingredient_synonyms
 from scripts.load_to_postgres import load_silver_to_postgres
 from scripts.merge_final_clean import merge_final_clean
 from scripts.second_clean_from_bad import second_clean_from_bad
@@ -36,6 +37,18 @@ default_args = {
     "retries": 1,
     "retry_delay": timedelta(minutes=5),
 }
+
+
+def env_bool(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int_or_none(name: str):
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+    return int(value)
+
 
 with DAG(
     dag_id="openfood_pipeline_united_states",
@@ -127,4 +140,34 @@ with DAG(
         python_callable=build_similarity_recommendations,
     )
 
-    extract_task >> upload_task >> first_clean_task >> second_clean_task >> merge_task >> load_task >> build_similarity_task
+    if env_bool("ENABLE_LLM_INGREDIENT_SYNONYMS"):
+        generate_synonyms_task = PythonOperator(
+            task_id="generate_ingredient_synonyms",
+            python_callable=generate_ingredient_synonyms,
+            op_kwargs={
+                "limit": int(os.getenv("INGREDIENT_SYNONYM_LIMIT", "100")),
+                "batch_size": int(os.getenv("INGREDIENT_SYNONYM_BATCH_SIZE", "20")),
+                "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                "cache_path": os.getenv(
+                    "INGREDIENT_SYNONYM_CACHE_PATH",
+                    os.path.join(DATA_DIR, "cache_ingredient_synonyms.json"),
+                ),
+                "dry_run": env_bool("INGREDIENT_SYNONYM_DRY_RUN"),
+                "preview_only": env_bool("INGREDIENT_SYNONYM_PREVIEW_ONLY"),
+                "include_existing": env_bool("INGREDIENT_SYNONYM_INCLUDE_EXISTING"),
+                "max_llm_calls": env_int_or_none("INGREDIENT_SYNONYM_MAX_LLM_CALLS"),
+            },
+        )
+
+        (
+            extract_task
+            >> upload_task
+            >> first_clean_task
+            >> second_clean_task
+            >> merge_task
+            >> load_task
+            >> generate_synonyms_task
+            >> build_similarity_task
+        )
+    else:
+        extract_task >> upload_task >> first_clean_task >> second_clean_task >> merge_task >> load_task >> build_similarity_task

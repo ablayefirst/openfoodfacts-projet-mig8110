@@ -384,6 +384,51 @@ def get_or_create(cur, table: str, id_col: str, value_col: str, value: str):
     return cur.fetchone()[0]
 
 
+def normalize_lookup_text(value: str | None) -> str | None:
+    txt = clean_text(value)
+    if txt is None:
+        return None
+    txt = txt.lower().strip()
+    txt = re.sub(r"\s+", " ", txt)
+    return txt or None
+
+
+def resolve_ingredient_id(cur, ingredient_name: str, cache_ingredient: dict[str, int]) -> int:
+    """Return a canonical ingredient id when a synonym mapping exists."""
+
+    lookup_name = normalize_lookup_text(ingredient_name)
+    if lookup_name is None:
+        raise ValueError("ingredient_name is empty")
+
+    if lookup_name in cache_ingredient:
+        return cache_ingredient[lookup_name]
+
+    cur.execute(
+        """
+        SELECT s.id_ingredient
+        FROM synonyme_ingredient s
+        WHERE LOWER(TRIM(s.nom_synonyme)) = LOWER(TRIM(%s))
+          AND COALESCE(s.relation_type, 'exact') IN ('exact', 'traduction', 'correction')
+        LIMIT 1
+        """,
+        (lookup_name,),
+    )
+    row = cur.fetchone()
+    if row:
+        cache_ingredient[lookup_name] = row[0]
+        return row[0]
+
+    ingredient_id = get_or_create(
+        cur,
+        "ingredient",
+        "id_ingredient",
+        "ingredients_nom",
+        lookup_name,
+    )
+    cache_ingredient[lookup_name] = ingredient_id
+    return ingredient_id
+
+
 def upsert_product(cur, row: pd.Series, marque_id):
     cur.execute(
         """
@@ -622,11 +667,7 @@ def load_dataframe_rows(
         # ---- Ingredients: parse ingredients_text (robust)
         ingredients = parse_ingredients_text(row.get("ingredients_text"))
         for ing in ingredients:
-            if ing in cache_ingredient:
-                ing_id = cache_ingredient[ing]
-            else:
-                ing_id = get_or_create(cur, "ingredient", "id_ingredient", "ingredients_nom", ing)
-                cache_ingredient[ing] = ing_id
+            ing_id = resolve_ingredient_id(cur, ing, cache_ingredient)
             if insert_link(cur, "produit_ingredient", "id_ingredient", code, ing_id):
                 stats["links_inserted"] += 1
 

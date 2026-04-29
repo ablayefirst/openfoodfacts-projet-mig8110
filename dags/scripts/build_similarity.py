@@ -29,11 +29,22 @@ SELECT
     v.saturated_fat_100g,
     v.fiber_100g,
     v.proteins_100g,
-    COALESCE(string_agg(DISTINCT ing.ingredients_nom, ', '), '') AS ingredients_text
+    COALESCE(
+        string_agg(
+            DISTINCT COALESCE(ing_canon.ingredients_nom, ing.ingredients_nom),
+            ', '
+        ),
+        ''
+    ) AS ingredients_text
 FROM produit p
 LEFT JOIN valeurs_nutritionnelles v ON p.code_produit = v.code_produit
 LEFT JOIN produit_ingredient pi ON p.code_produit = pi.code_produit
 LEFT JOIN ingredient ing ON pi.id_ingredient = ing.id_ingredient
+LEFT JOIN synonyme_ingredient si
+    ON LOWER(TRIM(si.nom_synonyme)) = LOWER(TRIM(ing.ingredients_nom))
+   AND COALESCE(si.relation_type, 'exact') IN ('exact', 'traduction', 'correction')
+LEFT JOIN ingredient ing_canon
+    ON si.id_ingredient = ing_canon.id_ingredient
 GROUP BY
     p.code_produit,
     p.nom_produit,
