@@ -13,17 +13,13 @@ if str(APP_DIR) not in sys.path:
 from db_connection import get_connection
 from image_utils import get_no_image_data_uri
 from top_menu import render_top_menu
-from ui_hero import render_page_hero
+
 
 st.set_page_config(page_title="Détail produit", layout="wide", initial_sidebar_state="collapsed")
 
 render_top_menu("Dashboard")
 
-render_page_hero(
-    kicker="Analyse produit",
-    title="Detail du produit",
-    subtitle="Consultez la fiche complete, les donnees nutritionnelles et les alternatives recommandees.",
-)
+
 
 conn = get_connection()
 
