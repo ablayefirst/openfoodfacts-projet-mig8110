@@ -8,6 +8,8 @@ import sys
 import tempfile
 from pathlib import PurePosixPath
 
+from sqlalchemy import create_engine
+
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
@@ -21,6 +23,7 @@ from transform_to_silver import (
     load_normalization_rules,
     write_empty_parquet,
     write_rows_chunk,
+    init_ai,
 )
 
 
@@ -70,13 +73,25 @@ def first_clean_from_bronze(
     output_key: str,
     input_bucket: str | None = None,
     output_bucket: str | None = None,
-    chunk_size: int = 5000,
+    chunk_size: int = 200,
     **_,
 ):
     if input_bucket is None:
         input_bucket = os.getenv("MINIO_BUCKET_BRONZE", "bronze")
     if output_bucket is None:
         output_bucket = os.getenv("MINIO_BUCKET_SILVER", "silver")
+
+    # ── Init AI
+    postgres_uri = os.getenv("OPENFOOD_POSTGRES_URI")
+    if postgres_uri:
+        try:
+            engine = create_engine(postgres_uri)
+            init_ai(engine)
+            print("[AI] ✅ AI initialisée (first_clean)")
+        except Exception as e:
+            print(f"[AI] ⚠️ Initialisation échouée ({type(e).__name__}: {e}) → ingrédients bruts conservés")
+    else:
+        print("[AI] ⚠️ POSTGRES_URI absent → AI désactivée (first_clean)")
 
     keys = derive_cleaning_keys(output_key)
     s3 = get_s3_client()
@@ -134,27 +149,42 @@ def first_clean_from_bronze(
                     continue
 
                 stats["rows_input"] += 1
+
+                # 🔥 build_row (LLM utilisé ici)
                 row = build_row(product, stats=transform_stats, rules=rules, recovery_mode=False)
+
                 issues = evaluate_final_contract(row)
 
                 if issues:
                     bad_product = dict(product)
+
+                    # 🔥 AJOUT CRITIQUE
+                    # On garde le résultat du nettoyage (LLM inclus)
+                    bad_product["_cleaned_row"] = row
+
                     bad_product["_quality_contract_issues"] = issues
+
                     bad_handle.write(json.dumps(bad_product, ensure_ascii=False) + "\n")
+
                     stats["rows_bad"] += 1
                     for issue in issues:
                         stats[issue] = stats.get(issue, 0) + 1
+
                     continue
 
                 rows_batch.append({column: row.get(column) for column in OUTPUT_COLUMNS})
                 stats["rows_good"] += 1
+
                 if len(rows_batch) >= chunk_size:
                     writer = write_rows_chunk(writer, rows_batch, good_path)
-                    rows_batch = []
+                    rows_batch.clear()
+                    import gc
+                    gc.collect()
 
         if rows_batch:
             writer = write_rows_chunk(writer, rows_batch, good_path)
             rows_batch = []
+
     finally:
         if writer is not None:
             writer.close()
@@ -165,24 +195,22 @@ def first_clean_from_bronze(
     try:
         s3.upload_file(good_path, output_bucket, keys["good_key"])
         s3.upload_file(bad_path, output_bucket, keys["bad_key"])
+
         stats["rules_loaded"] = 0 if rules_source == "defaults" else 1
         stats.update(transform_stats)
 
         print(
             "First cleaning summary: "
-            f"input={stats['rows_input']}, good={stats['rows_good']}, bad={stats['rows_bad']}, "
-            f"invalid_json={stats['invalid_json_lines']}, empty_lines={stats['empty_lines']}"
+            f"input={stats['rows_input']}, good={stats['rows_good']}, bad={stats['rows_bad']}"
         )
-        print(
-            f"Uploaded first-clean outputs to s3://{output_bucket}/{keys['good_key']} "
-            f"and s3://{output_bucket}/{keys['bad_key']}"
-        )
+
         return {
             "good_key": keys["good_key"],
             "bad_key": keys["bad_key"],
             "output_bucket": output_bucket,
             **stats,
         }
+
     finally:
         for path in (good_path, bad_path):
             if os.path.exists(path):

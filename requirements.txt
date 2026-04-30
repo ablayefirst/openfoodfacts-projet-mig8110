@@ -4,13 +4,19 @@
 pandas>=2.0.0
 numpy>=1.24.0
 pyarrow>=12.0.0
-piloty
 # ===============================
 # Database
 # ===============================
-sqlalchemy>=2.0.0
+sqlalchemy>=1.4,<2.0
 psycopg2-binary>=2.9.0
-
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.0+cpu
+# sentence-transformers 2.7.x est la dernière version compatible avec torch 2.2.x
+# sentence-transformers 3.x requiert torch >= 2.4 → incompatible
+sentence-transformers==2.7.0
+# transformers 4.38.x — dernière version stable avec torch 2.2.x sans NameError nn
+transformers==4.38.2
+huggingface_hub==0.20.3
 # ===============================
 # Data Validation
 # ===============================
@@ -31,7 +37,7 @@ python-dotenv>=1.0.0
 # Streamlit Dashboard
 # ===============================
 streamlit>=1.28.0
-
+openai>=1.0.0
 # ===============================
 # Utils
 # ===============================

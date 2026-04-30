@@ -12,7 +12,8 @@ x-airflow-common: &airflow-common
 
     # ⚠️ IMPORTANT : metadata Airflow -> airflow-postgres (pas postgres_openfood)
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@airflow-postgres:5432/${AIRFLOW_DB}
-
+    OPENFOOD_POSTGRES_URI: postgresql+psycopg2://postgres:postgres123@postgres:5432/openfood_db
+    MY_OPENAI_API_KEY: ${MY_OPENAI_API_KEY}
     # Variables utiles à tes DAGs (DB métier)
     POSTGRES_HOST: postgres
     POSTGRES_PORT: ${POSTGRES_PORT}
@@ -183,30 +184,6 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
-  # ---------- JUPYTER ----------
-  jupyter:
-    image: jupyter/datascience-notebook:latest
-    container_name: jupyter_openfood
-    ports:
-      - "8888:8888"
-    environment:
-      JUPYTER_ENABLE_LAB: "yes"
-      JUPYTER_TOKEN: ${JUPYTER_TOKEN}
-      GRANT_SUDO: "yes"
-    user: root
-    volumes:
-      - ./notebooks:/home/jovyan/work
-      - ./scripts:/home/jovyan/scripts
-      - ./data:/home/jovyan/data
-      - ./dags:/home/jovyan/dags
-    command: start-notebook.sh --NotebookApp.token='${JUPYTER_TOKEN}'
-    networks:
-      - openfood_network
-    depends_on:
-      postgres:
-        condition: service_healthy
-      minio:
-        condition: service_started
 
   # ---------- ADMINER ----------
   adminer:

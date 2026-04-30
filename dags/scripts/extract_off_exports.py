@@ -32,12 +32,14 @@ def count_core_nutrients(product: dict[str, Any]) -> int:
 
 def open_local_text_stream(path: Path):
     if path.suffix == ".gz":
+        print("📦 Fichier compressé détecté (.gz)")
         return gzip.open(path, "rt", encoding="utf-8", errors="replace")
+    print("📄 Fichier texte classique détecté")
     return path.open("r", encoding="utf-8", errors="replace")
 
 
 # =========================
-# 🔥 VERSION OPTIMISÉE
+# 🔥 PROCESS FILE
 # =========================
 
 def process_local_export_file(
@@ -49,24 +51,26 @@ def process_local_export_file(
     max_rows: int | None = None,
 ) -> bool:
 
+    print("🚀 START PROCESS FILE")
+    print("📂 Source :", source_path)
+    print("🌍 Country filter :", country)
+
     scanned = 0
-    max_scan = max_rows * 500 if max_rows else 50000 # 🔥 CRITIQUE pour éviter les zombies
+    max_scan = max_rows * 500 if max_rows else 50000
 
     country_tag = f"en:{country.lower().replace(' ', '-')}"
-
-    print(f"[INFO] Start processing file: {source_path}")
 
     with open_local_text_stream(source_path) as stream:
         for raw_line in stream:
             scanned += 1
 
-            # 🔥 LOG DEBUG
+            # 🔥 progression
             if scanned % 500 == 0:
-                print(f"[DEBUG] scanned={scanned}, kept={stats['rows_kept']}")
+                print(f"🔄 scanned={scanned} | kept={stats['rows_kept']}")
 
-            # 🔥 STOP HARD
+            # 🔥 stop sécurité
             if scanned >= max_scan:
-                print("[INFO] Max scan reached → stopping early")
+                print("🛑 STOP : max_scan atteint")
                 return True
 
             line = raw_line.strip()
@@ -85,12 +89,13 @@ def process_local_export_file(
                 stats["invalid_json_lines"] += 1
                 continue
 
-            # 🔥 COUNTRY FILTER OPTIMISÉ
+            # 🔥 filtre pays
             tags = [str(t).lower() for t in (product.get("countries_tags") or [])]
             if country_tag not in tags:
                 stats["dropped_country"] += 1
                 continue
 
+            # 🔥 filtres qualité
             if not not_empty(product, "code"):
                 stats["dropped_code"] += 1
                 continue
@@ -111,11 +116,16 @@ def process_local_export_file(
             output_handle.write(json.dumps(product) + "\n")
             stats["rows_kept"] += 1
 
-            # 🔥 STOP EARLY
+            # 🔥 debug échantillon
+            if stats["rows_kept"] <= 5:
+                print("✅ SAMPLE KEPT:", product.get("product_name"))
+
+            # 🔥 stop early
             if max_rows is not None and stats["rows_kept"] >= max_rows:
-                print("[INFO] Max rows reached → stopping")
+                print("🛑 STOP : max_rows atteint")
                 return True
 
+    print("✅ FIN LECTURE FICHIER")
     return False
 
 
@@ -133,11 +143,18 @@ def extract_official_exports(
     **_,
 ):
 
+    print("🚀 START EXTRACT TASK")
+
     if source_mode is None:
         source_mode = os.getenv("OPENFOOD_SOURCE_MODE", "local")
 
     if local_file is None:
         local_file = os.getenv("OPENFOOD_LOCAL_FILE")
+
+    print("⚙️ CONFIG")
+    print("   source_mode =", source_mode)
+    print("   local_file =", local_file)
+    print("   output_dir =", output_dir)
 
     if not local_file:
         raise ValueError("OPENFOOD_LOCAL_FILE must be defined")
@@ -147,13 +164,18 @@ def extract_official_exports(
     if not local_path.is_absolute():
         local_path = Path(output_dir) / local_file
 
+    print("📂 PATH FINAL :", local_path)
+
     if not local_path.exists():
+        print("❌ FICHIER INTROUVABLE !!!")
         raise FileNotFoundError(f"File not found: {local_path}")
 
-    print(f"[INFO] Using LOCAL file: {local_path}")
+    print("✅ Fichier trouvé")
 
     output_path = Path(output_dir) / "bronze" / "openfood" / "local" / "openfood_local.jsonl"
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    print("💾 OUTPUT :", output_path)
 
     stats = {
         "lines_read": 0,
@@ -176,7 +198,11 @@ def extract_official_exports(
             max_rows=max_rows,
         )
 
-    print(f"[INFO] DONE → kept={stats['rows_kept']} rows")
+    print("📊 STATS FINAL")
+    for k, v in stats.items():
+        print(f"   {k} = {v}")
+
+    print(f"✅ EXTRACT DONE → kept={stats['rows_kept']} rows")
 
     return {
         "import_type": "local",

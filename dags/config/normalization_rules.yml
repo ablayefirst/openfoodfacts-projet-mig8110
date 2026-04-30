@@ -1,0 +1,107 @@
+version: 1
+
+# =========================
+# 🔤 TEXT NORMALIZATION
+# =========================
+text:
+  lowercase: true
+  strip: true
+  remove_accents: true
+  normalize_spaces: true
+
+# =========================
+# 🚫 STOPWORDS / NOISE
+# =========================
+noise_words:
+  - www
+  - http
+  - https
+  - barcode
+  - scan
+  - call
+  - distributed
+  - store
+  - product
+  - made
+  - facility
+
+# =========================
+# 🔁 REPLACEMENTS
+# =========================
+replacements:
+
+  # fautes fréquentes
+  - pattern: "suggar"
+    replacement: "sugar"
+
+  - pattern: "milc"
+    replacement: "milk"
+
+  - pattern: "pwoder"
+    replacement: "powder"
+
+  - pattern: "protien"
+    replacement: "protein"
+
+  # variantes ingrédients
+  - pattern: "whole milk powder"
+    replacement: "milk powder"
+
+  - pattern: "skimmed milk powder"
+    replacement: "milk powder"
+
+  - pattern: "cane sugar"
+    replacement: "sugar"
+
+# =========================
+# 🧹 FILTERING RULES
+# =========================
+filters:
+
+  min_length: 2
+  max_words: 10
+
+  remove_if_contains_digits: false
+  remove_if_contains_special_chars: true
+
+# =========================
+# 🧠 INGREDIENTS RULES
+# =========================
+ingredients:
+
+  # supprimer éléments vides
+  remove_empty: true
+
+  # déduplication
+  deduplicate: true
+
+  # garder parenthèses
+  keep_parentheses: true
+
+# =========================
+# 📦 CATEGORIES
+# =========================
+categories:
+
+  default: "other"
+
+  mapping:
+    beverages: "beverages"
+    snacks: "snacks"
+    dairy: "dairy"
+    sweets: "sweets"
+    cereals: "cereals"
+
+# =========================
+# 🎯 PRIMARY CATEGORY RULES
+# =========================
+primary_category:
+
+  priority:
+    - beverages
+    - dairy
+    - snacks
+    - sweets
+    - cereals
+
+  fallback: "other"

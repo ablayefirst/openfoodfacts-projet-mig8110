@@ -13,39 +13,72 @@ def get_database_url() -> str:
     password = os.getenv("POSTGRES_PASSWORD", "postgres123")
     return f"{driver}://{user}:{password}@{host}:{port}/{db}"
 
+
 # ==============================
 # 1. Charger produits
 # ==============================
+# CORRECTIONS :
+#   - Suppression du JOIN vers valeurs_nutritionnelles (n'existe pas dans le schéma)
+#   - Suppression du JOIN vers produit_ingredient / ingredient (n'existent pas)
+#   - nom_produit → nom  (nom réel de la colonne dans la table produit)
+#   - proteins_100g supprimé (colonne absente de la table produit)
+#   - Les ingrédients sont récupérés depuis produit_ingredient_similaire + ingredient_similaire
+#     en suivant la logique du chargement (ordre ASC pour respecter la séquence)
 
 QUERY = """
 SELECT
-    p.code_produit,
-    p.nom_produit,
+    p.code_barre AS code_produit,
+    p.nom_produit AS nom,
     p.categorie_principale,
     p.nutrition_grade,
     p.nova_group,
-    v.sugars_100g,
-    v.salt_100g,
-    v.saturated_fat_100g,
-    v.fiber_100g,
-    v.proteins_100g,
-    COALESCE(string_agg(DISTINCT ing.ingredients_nom, ', '), '') AS ingredients_text
+    p.sugars_100g,
+    p.salt_100g,
+    p.saturated_fat_100g,
+    p.fiber_100g,
+    p.carbohydrates_100g AS carbs_100g,
+
+    COALESCE(
+        string_agg(DISTINCT i.nom_canonique, ', '),
+        ''
+    )
+    ||
+    CASE 
+        WHEN COUNT(s.nom_synonyme) > 0 
+             AND COUNT(i.nom_canonique) > 0
+        THEN ', '
+        ELSE ''
+    END
+    ||
+    COALESCE(
+        string_agg(DISTINCT s.nom_synonyme, ', '),
+        ''
+    ) AS ingredients_text
+
 FROM produit p
-LEFT JOIN valeurs_nutritionnelles v ON p.code_produit = v.code_produit
-LEFT JOIN produit_ingredient pi ON p.code_produit = pi.code_produit
-LEFT JOIN ingredient ing ON pi.id_ingredient = ing.id_ingredient
+
+LEFT JOIN contient c
+    ON p.id_produit = c.id_produit
+
+LEFT JOIN ingredient_standardise i
+    ON c.id_ingredient = i.id_ingredient
+
+LEFT JOIN ingredient_synonyme s
+    ON i.id_ingredient = s.id_ingredient
+
 GROUP BY
-    p.code_produit,
+    p.code_barre,
     p.nom_produit,
     p.categorie_principale,
     p.nutrition_grade,
     p.nova_group,
-    v.sugars_100g,
-    v.salt_100g,
-    v.saturated_fat_100g,
-    v.fiber_100g,
-    v.proteins_100g
+    p.sugars_100g,
+    p.salt_100g,
+    p.saturated_fat_100g,
+    p.fiber_100g,
+    p.carbohydrates_100g;
 """
+
 
 # ==============================
 # 2. Fonctions utilitaires
@@ -102,15 +135,15 @@ def quality_bonus(source_grade, target_grade, source_nova, target_nova):
     return bonus
 
 
-def compute_health_score(sugar, salt, fat_sat, fiber, proteins, nova, nutriscore):
+def compute_health_score(sugar, salt, fat_sat, fiber, nova, nutriscore):
     """
     Score santé inspiré des recommandations OMS.
 
-    Idée :
-    - pénaliser fortement le sucre, le sel et les graisses saturées
-    - récompenser les fibres
-    - donner un petit bonus aux protéines
-    - garder NOVA et NutriScore comme facteurs complémentaires
+    - Pénalise fortement le sucre, le sel et les graisses saturées
+    - Récompense les fibres
+    - Intègre NOVA et NutriScore comme facteurs complémentaires
+
+    CORRECTION : paramètre proteins supprimé (colonne absente du schéma)
 
     Le score final est borné entre 0 et 100.
     Plus le score est élevé, plus le produit est considéré comme sain.
@@ -118,13 +151,11 @@ def compute_health_score(sugar, salt, fat_sat, fiber, proteins, nova, nutriscore
 
     score = 100.0
 
-    # Repères utilisés dans le scoring
-    # (adaptés pour évaluer un produit à partir de ses valeurs /100g)
     WHO_SUGAR_IDEAL = 25.0
-    WHO_SUGAR_MAX = 50.0
-    WHO_SALT_MAX = 5.0
+    WHO_SUGAR_MAX   = 50.0
+    WHO_SALT_MAX    = 5.0
     WHO_SAT_FAT_MAX = 22.0
-    WHO_FIBER_MIN = 25.0
+    WHO_FIBER_MIN   = 25.0
 
     # ----------------------------
     # 1. Pénalité sucre
@@ -134,7 +165,7 @@ def compute_health_score(sugar, salt, fat_sat, fiber, proteins, nova, nutriscore
             sugar = float(sugar)
 
             sugar_ratio_ideal = sugar / WHO_SUGAR_IDEAL
-            sugar_ratio_max = sugar / WHO_SUGAR_MAX
+            sugar_ratio_max   = sugar / WHO_SUGAR_MAX
 
             if sugar <= 5:
                 score -= 0
@@ -218,21 +249,7 @@ def compute_health_score(sugar, salt, fat_sat, fiber, proteins, nova, nutriscore
         pass
 
     # ----------------------------
-    # 5. Bonus protéines
-    # ----------------------------
-    try:
-        if proteins is not None and pd.notna(proteins):
-            proteins = float(proteins)
-
-            if proteins >= 10:
-                score += 4
-            elif proteins >= 5:
-                score += 2
-    except Exception:
-        pass
-
-    # ----------------------------
-    # 6. Ajustement NOVA
+    # 5. Ajustement NOVA
     # ----------------------------
     try:
         if nova is not None and pd.notna(nova):
@@ -248,7 +265,7 @@ def compute_health_score(sugar, salt, fat_sat, fiber, proteins, nova, nutriscore
         pass
 
     # ----------------------------
-    # 7. Ajustement NutriScore
+    # 6. Ajustement NutriScore
     # ----------------------------
     try:
         nutriscore = str(nutriscore).upper()
@@ -287,9 +304,9 @@ def is_healthier(
     target_fat_sat=None,
     source_fiber=None,
     target_fiber=None,
-    source_proteins=None,
-    target_proteins=None,
 ):
+    # CORRECTION : paramètres proteins supprimés (colonne absente du schéma)
+
     source_nutri = nutriscore_value(source_grade)
     target_nutri = nutriscore_value(target_grade)
 
@@ -309,9 +326,7 @@ def is_healthier(
     if target_health_score <= source_health_score:
         return False
 
-    # 4. Garde-fous critiques :
-    # on refuse "plus sain" si le produit cible est nettement pire
-    # sur des critères critiques
+    # 4. Garde-fous critiques
     try:
         if source_sugar is not None and target_sugar is not None:
             if pd.notna(source_sugar) and pd.notna(target_sugar):
@@ -371,21 +386,10 @@ def is_healthier(
     except Exception:
         pass
 
-    try:
-        if source_proteins is not None and target_proteins is not None:
-            if pd.notna(source_proteins) and pd.notna(target_proteins):
-                if float(target_proteins) > float(source_proteins):
-                    improvements += 1
-    except Exception:
-        pass
-
     if target_nutri > source_nutri:
         improvements += 1
 
-    # 6. Détection des cas de compromis / trade-off :
-    # si le produit cible améliore certains critères
-    # mais le produit source reste meilleur sur d'autres critères majeurs,
-    # on évite de dire trop vite "plus sain"
+    # 6. Détection des cas de compromis / trade-off
     source_advantages = 0
     target_advantages = 0
 
@@ -429,19 +433,6 @@ def is_healthier(
     except Exception:
         pass
 
-    try:
-        if source_proteins is not None and target_proteins is not None:
-            if pd.notna(source_proteins) and pd.notna(target_proteins):
-                if float(target_proteins) > float(source_proteins):
-                    target_advantages += 1
-                elif float(source_proteins) > float(target_proteins):
-                    source_advantages += 1
-    except Exception:
-        pass
-
-    # Si chaque produit a plusieurs avantages majeurs,
-    # on considère que c'est un compromis nutritionnel,
-    # donc pas une vraie alternative "plus saine"
     if target_advantages >= 2 and source_advantages >= 2:
         return False
 
@@ -460,7 +451,10 @@ def clean(text):
     if not text:
         return []
 
-    text = str(text).lower().replace("(", ",").replace(")", ",")
+    text = str(text).lower()
+    text = text.replace("(", ",").replace(")", ",")
+    text = text.replace("|", ",")  # 🔥 important pour synonymes
+
     tokens = [t.strip() for t in text.split(",")]
 
     cleaned = []
@@ -486,15 +480,15 @@ def ensure_similarity_table(conn) -> None:
         text(
             """
             CREATE TABLE IF NOT EXISTS produit_similaire (
-                code_produit_source TEXT REFERENCES produit(code_produit) ON DELETE CASCADE,
-                code_produit_cible TEXT REFERENCES produit(code_produit) ON DELETE CASCADE,
+                code_produit_source TEXT REFERENCES produit(code_barre) ON DELETE CASCADE,
+                code_produit_cible  TEXT REFERENCES produit(code_barre) ON DELETE CASCADE,
                 type_recommandation TEXT NOT NULL,
-                score_similarite NUMERIC,
+                score_similarite    NUMERIC,
                 nb_ingredients_communs INTEGER,
                 ingredients_communs TEXT,
-                methode TEXT,
+                methode             TEXT,
                 health_score_source NUMERIC,
-                health_score_cible NUMERIC,
+                health_score_cible  NUMERIC,
                 PRIMARY KEY (code_produit_source, code_produit_cible, type_recommandation)
             )
             """
@@ -566,7 +560,7 @@ def build_similarity_recommendations(**_):
     # 6. Calcul des recommandations
     # ==============================
 
-    similar_results = []
+    similar_results  = []
     healthier_results = []
 
     for i, a in df.iterrows():
@@ -593,12 +587,12 @@ def build_similarity_recommendations(**_):
                 b["nova_group"]
             )
 
+            # CORRECTION : proteins_100g supprimé de compute_health_score
             health_score_a = compute_health_score(
                 a["sugars_100g"],
                 a["salt_100g"],
                 a["saturated_fat_100g"],
                 a["fiber_100g"],
-                a["proteins_100g"],
                 a["nova_group"],
                 a["nutrition_grade"]
             )
@@ -608,7 +602,6 @@ def build_similarity_recommendations(**_):
                 b["salt_100g"],
                 b["saturated_fat_100g"],
                 b["fiber_100g"],
-                b["proteins_100g"],
                 b["nova_group"],
                 b["nutrition_grade"]
             )
@@ -617,7 +610,7 @@ def build_similarity_recommendations(**_):
 
             score = 0.55 * cos + 0.20 * jac + cat_bonus + qual_bonus + (0.05 * health_diff)
 
-            commons = list(set(a["ingredients_clean"]) & set(b["ingredients_clean"]))
+            commons        = list(set(a["ingredients_clean"]) & set(b["ingredients_clean"]))
             commons_sorted = sorted(commons)
 
             # Garde-fous qualité
@@ -634,19 +627,20 @@ def build_similarity_recommendations(**_):
             # Recommandations similaires
             # ------------------------------
             similar_results.append({
-                "code_produit_source": a["code_produit"],
-                "code_produit_cible": b["code_produit"],
-                "score_similarite": round(float(score), 4),
+                "code_produit_source":   a["code_produit"],
+                "code_produit_cible":    b["code_produit"],
+                "score_similarite":      round(float(score), 4),
                 "nb_ingredients_communs": len(commons_sorted),
-                "ingredients_communs": ", ".join(commons_sorted[:8]),
-                "methode": "tfidf_jaccard_qualite_healthscore_oms_ameliore",
-                "type_recommandation": "similaire",
-                "health_score_source": health_score_a,
-                "health_score_cible": health_score_b
+                "ingredients_communs":   ", ".join(commons_sorted[:8]),
+                "methode":               "tfidf_jaccard_qualite_healthscore_oms_ameliore",
+                "type_recommandation":   "similaire",
+                "health_score_source":   health_score_a,
+                "health_score_cible":    health_score_b,
             })
 
             # ------------------------------
             # Recommandations plus saines
+            # CORRECTION : proteins supprimés des paramètres de is_healthier
             # ------------------------------
             if is_healthier(
                 a["nutrition_grade"],
@@ -663,26 +657,24 @@ def build_similarity_recommendations(**_):
                 b["saturated_fat_100g"],
                 a["fiber_100g"],
                 b["fiber_100g"],
-                a["proteins_100g"],
-                b["proteins_100g"],
             ):
                 healthier_results.append({
-                    "code_produit_source": a["code_produit"],
-                    "code_produit_cible": b["code_produit"],
-                    "score_similarite": round(float(score), 4),
+                    "code_produit_source":   a["code_produit"],
+                    "code_produit_cible":    b["code_produit"],
+                    "score_similarite":      round(float(score), 4),
                     "nb_ingredients_communs": len(commons_sorted),
-                    "ingredients_communs": ", ".join(commons_sorted[:8]),
-                    "methode": "tfidf_jaccard_qualite_healthscore_oms_ameliore",
-                    "type_recommandation": "plus_saine",
-                    "health_score_source": health_score_a,
-                    "health_score_cible": health_score_b
+                    "ingredients_communs":   ", ".join(commons_sorted[:8]),
+                    "methode":               "tfidf_jaccard_qualite_healthscore_oms_ameliore",
+                    "type_recommandation":   "plus_saine",
+                    "health_score_source":   health_score_a,
+                    "health_score_cible":    health_score_b,
                 })
 
     # ==============================
     # 7. Création des DataFrames
     # ==============================
 
-    similar_df = pd.DataFrame(similar_results)
+    similar_df  = pd.DataFrame(similar_results)
     healthier_df = pd.DataFrame(healthier_results)
 
     print("Total recommandations similaires :", len(similar_df))

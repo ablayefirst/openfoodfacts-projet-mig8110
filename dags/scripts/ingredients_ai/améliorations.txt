@@ -1,0 +1,67 @@
+🔴 PROBLÈMES CRITIQUES (à corriger en priorité)
+Embedding crash possible si la DB est vide (liste de référence vide)
+Absence de protection dans EmbeddingCorrector.correct() si embeddings non initialisés
+LLM peut retourner une réponse invalide (liste vide ou mauvais format) non sécurisée
+Parsing parenthèses peut casser si depth devient négatif
+Absence de validation stricte du résultat LLM avant utilisation
+Aucun contrôle global du nombre d’appels LLM (risque coût + lenteur)
+Couplage direct process() sans fallback si corrector est mal initialisé
+🟠 PROBLÈMES IMPORTANTS (logique / qualité)
+Mapping synonymes sensible à la casse (lower() manquant)
+Cleaning supprime les caractères accentués (perte d’information)
+Score qualité dépend du nombre d’ingrédients (pas normalisé)
+LLM peut être appelé inutilement même si embedding suffisant
+Pas de limite sur la taille des ingrédients envoyés au LLM
+Cache LLM non protégé contre corruption (JSON cassé possible)
+Absence de validation stricte des ingrédients retournés par LLM
+final_cleanup trop permissif (peut garder du bruit)
+smart LLM → envoyer uniquement les ingrédients suspects
+basic_spell_fix très limité (peu extensible)
+🟡 PROBLÈMES PERFORMANCE
+LLM appelé ligne par ligne (pas de batching réel)
+Pas de limite globale des appels LLM
+Embedding recalculé pour chaque ligne (pas de cache embeddings input)
+pandas.read_sql charge toute la table en mémoire (scalabilité limitée)
+Pas de lazy loading du modèle embedding
+Pas de fallback CPU/GPU pour embedding
+Pas de gestion mémoire sur gros fichiers streaming
+🟣 PROBLÈMES D’ARCHITECTURE
+Variables globales (AI_CORRECTOR, SYNONYM_MAP) non thread-safe
+Couplage fort entre pipeline ETL et module AI
+process() dépend fortement de l’état global
+Pas de séparation claire service / logique métier
+Pas de gestion d’injection de dépendances (engine, corrector, etc.)
+Difficulté à tester indépendamment chaque module
+🔵 PROBLÈMES ROBUSTESSE
+Pas de retry sur appel LLM
+Pas de timeout explicite LLM
+Pas de gestion fine des erreurs embedding
+Pas de fallback si modèle embedding échoue
+Pas de validation du schéma des données retournées
+Pas de logs détaillés pour debugging avancé
+Cache LLM non versionné
+🟢 AMÉLIORATIONS RECOMMANDÉES
+Ajouter mode bootstrap LLM intelligent (déjà partiellement fait)
+Normaliser tous les inputs (lowercase + strip) avant traitement
+Ajouter limite max ingrédients (MAX_INGREDIENTS)
+Ajouter scoring confiance LLM
+Ajouter enrichissement automatique DB (learning loop)
+Ajouter monitoring (ratio AI / LLM)
+Ajouter logs structurés (JSON logs)
+Ajouter tests unitaires
+⚪ AMÉLIORATIONS AVANCÉES (niveau production)
+Batch LLM réel (regrouper plusieurs produits)
+Cache embeddings pour éviter recomputation
+Index DB sur synonymes
+Pipeline async (LLM non bloquant)
+Système de versioning des règles YAML
+Monitoring métriques (Prometheus / logs)
+Feature flags pour activer/désactiver AI
+🧠 CE QUI EST BIEN (important de le noter)
+Architecture modulaire claire
+Séparation parsing / cleaning / AI
+Pipeline streaming performant
+Intégration DB logique
+Cache LLM déjà présent
+Fallback intelligent embedding → LLM
+Code globalement propre et lisible

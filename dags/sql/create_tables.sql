@@ -1,186 +1,277 @@
--- =====================================================
--- TABLES PRINCIPALES
--- =====================================================
+-- ══════════════════════════════════════════════════════════════════
+-- OPENFOOD DB — Schéma relationnel corrigé
+-- Niveau : Master Data Engineering
+-- Corrections appliquées :
+--
+--  [C-1] trace_allergene restructurée — une TRACE provoque un ALLERGENE.
+--        produit → produit_trace → trace → trace_allergene → allergene
+--        Suppression de produit_allergene (redondant).
+--        produit_trace + trace_allergene (trace → allergene).
+--
+--  [C-2] contient : PK corrigée — (id_produit, id_ingredient, ordre)
+--        posait un problème si ordre=NULL ou si un ingrédient
+--        apparaît à plusieurs niveaux. Remplacé par une PK SERIAL
+--        id_contient + contrainte UNIQUE (id_produit, ordre).
+--
+--  [C-3] sous_ingredient : FK composite vers contient(id_produit,
+--        id_ingredient) était dangereuse car non unique dans contient.
+--        Remplacé par FK vers id_contient (PK propre de contient).
+--
+--  [C-4] ingredient_synonyme : ajout colonne langue pour mieux
+--        refléter la sémantique (variante orthographique / langue).
+--
+--  [C-5] produit : id_categorie_principale devient une colonne TEXT
+--        simple (nom de la catégorie principale) — pas besoin d'une
+--        FK complète ici, la relation N:N produit_categorie suffit.
+--        Évite une dépendance circulaire produit ↔ categorie.
+-- ══════════════════════════════════════════════════════════════════
 
-CREATE TABLE IF NOT EXISTS marque (
-    id_marque SERIAL PRIMARY KEY,
-    brands TEXT UNIQUE NOT NULL
-);
 
-CREATE TABLE IF NOT EXISTS categorie (
-    id_categorie SERIAL PRIMARY KEY,
-    categorie TEXT NOT NULL,
-    pnns_groups_1 TEXT,
-    parent_id INTEGER REFERENCES categorie(id_categorie) ON DELETE SET NULL
-);
+-- ══════════════════════════════════════════════════════════════════
+-- NETTOYAGE
+-- ══════════════════════════════════════════════════════════════════
+DROP TABLE IF EXISTS trace_allergene        CASCADE;
+DROP TABLE IF EXISTS produit_trace          CASCADE;
+DROP TABLE IF EXISTS sous_ingredient        CASCADE;
+DROP TABLE IF EXISTS produit_similaire       CASCADE;
+DROP TABLE IF EXISTS contient               CASCADE;
+DROP TABLE IF EXISTS ingredient_synonyme    CASCADE;
+DROP TABLE IF EXISTS ingredient_standardise CASCADE;
+DROP TABLE IF EXISTS produit_categorie      CASCADE;
+DROP TABLE IF EXISTS categorie              CASCADE;
+DROP TABLE IF EXISTS allergene              CASCADE;
+DROP TABLE IF EXISTS trace                  CASCADE;
+DROP TABLE IF EXISTS produit                CASCADE;
+DROP TABLE IF EXISTS marque                 CASCADE;
 
-CREATE TABLE IF NOT EXISTS pays (
-    id_pays SERIAL PRIMARY KEY,
-    countries_en TEXT UNIQUE NOT NULL
-);
 
-CREATE TABLE IF NOT EXISTS ingredient (
-    id_ingredient SERIAL PRIMARY KEY,
-    ingredients_nom TEXT UNIQUE NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS allergene (
-    allergen_id SERIAL PRIMARY KEY,
-    allergens TEXT UNIQUE NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS label (
-    label_id SERIAL PRIMARY KEY,
-    labels TEXT UNIQUE NOT NULL
-);
-
--- =====================================================
--- PRODUIT
--- =====================================================
-
-CREATE TABLE IF NOT EXISTS produit (
-    code_produit TEXT PRIMARY KEY,
-    nom_produit TEXT NOT NULL,
-    quantite TEXT,
-    categorie_principale TEXT,
-    nutrition_grade CHAR(1),
-    nutriscore_score INTEGER,
-    nova_group INTEGER,
-    url TEXT,
-    image_url TEXT,
-    image_small_url TEXT,
-    image_nutrition_url TEXT,
-    id_marque INTEGER REFERENCES marque(id_marque) ON DELETE SET NULL
-);
-
--- =====================================================
--- VALEURS NUTRITIONNELLES (1-1)
--- =====================================================
-
-CREATE TABLE IF NOT EXISTS valeurs_nutritionnelles (
-    code_produit TEXT PRIMARY KEY
-        REFERENCES produit(code_produit)
-        ON DELETE CASCADE,
-    energy_kcal_100g NUMERIC,
-    saturated_fat_100g NUMERIC,
-    sugars_100g NUMERIC,
-    fiber_100g NUMERIC,
-    proteins_100g NUMERIC,
-    salt_100g NUMERIC,
-    carbohydrates_100g NUMERIC,
-    fat_100g NUMERIC
-);
-
--- =====================================================
--- TABLES D'ASSOCIATION (N-N)
--- =====================================================
-
-CREATE TABLE IF NOT EXISTS produit_categorie (
-    code_produit TEXT REFERENCES produit(code_produit) ON DELETE CASCADE,
-    id_categorie INTEGER REFERENCES categorie(id_categorie) ON DELETE CASCADE,
-    PRIMARY KEY (code_produit, id_categorie)
+-- ══════════════════════════════════════════════════════════════════
+-- 1. MARQUE
+--    Entité indépendante
+-- ══════════════════════════════════════════════════════════════════
+CREATE TABLE marque (
+    id_marque   SERIAL PRIMARY KEY,
+    nom_marque  TEXT NOT NULL UNIQUE
 );
 
 
-CREATE TABLE IF NOT EXISTS synonyme_ingredient (
-    id_synonyme SERIAL PRIMARY KEY,
-    nom_synonyme TEXT,
-    id_ingredient INT REFERENCES ingredient(id_ingredient)
+-- ══════════════════════════════════════════════════════════════════
+-- 2. CATEGORIE
+--    Entité indépendante
+-- ══════════════════════════════════════════════════════════════════
+CREATE TABLE categorie (
+    id_categorie    SERIAL PRIMARY KEY,
+    nom_categorie   TEXT NOT NULL UNIQUE
 );
 
 
-CREATE TABLE IF NOT EXISTS produit_ingredient (
-    code_produit TEXT REFERENCES produit(code_produit) ON DELETE CASCADE,
-    id_ingredient INTEGER REFERENCES ingredient(id_ingredient) ON DELETE CASCADE,
-    PRIMARY KEY (code_produit, id_ingredient)
+-- ══════════════════════════════════════════════════════════════════
+-- 3. PRODUIT
+--    Table centrale
+--    [C-5] categorie_principale = TEXT (nom libre), pas FK
+-- ══════════════════════════════════════════════════════════════════
+CREATE TABLE produit (
+    id_produit              SERIAL PRIMARY KEY,
+    code_barre              TEXT UNIQUE,            -- code EAN OpenFoodFacts
+    nom_produit             TEXT NOT NULL,
+    quantite                TEXT,
+    categorie_principale    TEXT,                   -- [C-5] champ texte libre
+    nutrition_grade         TEXT,
+    nutriscore_score        INT,
+    nova_group              INT CHECK (nova_group BETWEEN 1 AND 4),
+    url                     TEXT,
+    image_url               TEXT,
+    image_small_url         TEXT,
+    image_ingredients_url   TEXT,
+    image_nutrition_url     TEXT,
+    -- valeurs nutritionnelles pour 100g
+    energy_kcal_100g        FLOAT,
+    fat_100g                FLOAT,
+    saturated_fat_100g      FLOAT,
+    carbohydrates_100g      FLOAT,
+    sugars_100g             FLOAT,
+    fiber_100g              FLOAT,
+    proteins_100g           FLOAT,
+    salt_100g               FLOAT,
+    -- FK
+    id_marque               INT REFERENCES marque(id_marque) ON DELETE SET NULL
 );
 
-CREATE TABLE IF NOT EXISTS produit_pays (
-    code_produit TEXT REFERENCES produit(code_produit) ON DELETE CASCADE,
-    id_pays INTEGER REFERENCES pays(id_pays) ON DELETE CASCADE,
-    PRIMARY KEY (code_produit, id_pays)
+
+-- ══════════════════════════════════════════════════════════════════
+-- 4. PRODUIT_CATEGORIE
+--    Relation N:N produit ↔ categorie (un produit appartient à
+--    plusieurs catégories hiérarchiques OpenFoodFacts)
+-- ══════════════════════════════════════════════════════════════════
+CREATE TABLE produit_categorie (
+    id_produit      INT NOT NULL REFERENCES produit(id_produit)     ON DELETE CASCADE,
+    id_categorie    INT NOT NULL REFERENCES categorie(id_categorie) ON DELETE CASCADE,
+    niveau          INT,    -- profondeur dans la hiérarchie (1 = racine)
+    PRIMARY KEY (id_produit, id_categorie)
 );
 
-CREATE TABLE IF NOT EXISTS produit_allergene (
-    code_produit TEXT REFERENCES produit(code_produit) ON DELETE CASCADE,
-    allergen_id INTEGER REFERENCES allergene(allergen_id) ON DELETE CASCADE,
-    PRIMARY KEY (code_produit, allergen_id)
+
+-- ══════════════════════════════════════════════════════════════════
+-- 5. ALLERGENE
+--    Référentiel des allergènes réglementaires (14 allergènes EU)
+--    Exemples : gluten, lait, arachides, fruits à coque...
+-- ══════════════════════════════════════════════════════════════════
+CREATE TABLE allergene (
+    id_allergene    SERIAL PRIMARY KEY,
+    nom_allergene   TEXT NOT NULL UNIQUE
 );
 
-CREATE TABLE IF NOT EXISTS produit_label (
-    code_produit TEXT REFERENCES produit(code_produit) ON DELETE CASCADE,
-    label_id INTEGER REFERENCES label(label_id) ON DELETE CASCADE,
-    PRIMARY KEY (code_produit, label_id)
+
+-- ══════════════════════════════════════════════════════════════════
+-- 6. TRACE
+--    Substance pouvant être présente en traces dans le produit
+--    Exemples : "noix", "sésame", "lait"...
+--    C'est la TRACE qui provoque un allergène, pas le produit
+--    directement.
+-- ══════════════════════════════════════════════════════════════════
+CREATE TABLE trace (
+    id_trace    SERIAL PRIMARY KEY,
+    nom_trace   TEXT NOT NULL UNIQUE
 );
 
--- =====================================================
--- SUIVI TECHNIQUE DES IMPORTS
--- =====================================================
 
-CREATE TABLE IF NOT EXISTS etl_import_history (
-    import_id SERIAL PRIMARY KEY,
-    import_type TEXT NOT NULL,
-    bronze_key TEXT,
-    silver_key TEXT,
-    source_reference TEXT,
-    source_start_ts BIGINT,
-    source_end_ts BIGINT,
-    rows_input INTEGER NOT NULL DEFAULT 0,
-    rows_loaded INTEGER NOT NULL DEFAULT 0,
-    imported_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+-- ══════════════════════════════════════════════════════════════════
+-- 7. PRODUIT_TRACE
+--    Relation N:N produit ↔ trace
+--    "Ce produit peut contenir des traces de..."
+-- ══════════════════════════════════════════════════════════════════
+CREATE TABLE produit_trace (
+    id_produit  INT NOT NULL REFERENCES produit(id_produit) ON DELETE CASCADE,
+    id_trace    INT NOT NULL REFERENCES trace(id_trace)     ON DELETE CASCADE,
+    PRIMARY KEY (id_produit, id_trace)
 );
 
--- =====================================================
--- RECOMMANDATIONS PRODUITS
--- =====================================================
 
-CREATE TABLE IF NOT EXISTS produit_similaire (
-    code_produit_source TEXT REFERENCES produit(code_produit) ON DELETE CASCADE,
-    code_produit_cible TEXT REFERENCES produit(code_produit) ON DELETE CASCADE,
-    type_recommandation TEXT NOT NULL,
-    score_similarite NUMERIC,
-    nb_ingredients_communs INTEGER,
-    ingredients_communs TEXT,
-    methode TEXT,
-    health_score_source NUMERIC,
-    health_score_cible NUMERIC,
-    PRIMARY KEY (code_produit_source, code_produit_cible, type_recommandation)
+-- ══════════════════════════════════════════════════════════════════
+-- 8. TRACE_ALLERGENE
+--    Relation N:N trace ↔ allergene
+--    "Cette trace provoque cet allergène"
+--    Exemple : trace "noix" → allergène "fruits à coque"
+--    On obtient les allergènes d'un produit via :
+--      produit → produit_trace → trace → trace_allergene → allergene
+-- ══════════════════════════════════════════════════════════════════
+CREATE TABLE trace_allergene (
+    id_trace        INT NOT NULL REFERENCES trace(id_trace)         ON DELETE CASCADE,
+    id_allergene    INT NOT NULL REFERENCES allergene(id_allergene)  ON DELETE CASCADE,
+    PRIMARY KEY (id_trace, id_allergene)
 );
 
--- =====================================================
--- INDEX POUR PERFORMANCE (APP WEB + ETL)
--- =====================================================
 
--- Cleanup for databases created with older schema versions.
--- UNIQUE constraints already create indexes for marque, pays, ingredient,
--- allergene and label, so explicit duplicates are unnecessary.
-DROP INDEX IF EXISTS idx_produit_nom;
-DROP INDEX IF EXISTS idx_categorie_nom;
-DROP INDEX IF EXISTS idx_ingredient_nom;
-DROP INDEX IF EXISTS idx_allergene_nom;
-DROP INDEX IF EXISTS idx_label_nom;
-DROP INDEX IF EXISTS idx_marque_nom;
-DROP INDEX IF EXISTS idx_pays_nom;
+-- ══════════════════════════════════════════════════════════════════
+-- 9. INGREDIENT_STANDARDISE
+--    Référentiel des ingrédients avec nom canonique normalisé
+-- ══════════════════════════════════════════════════════════════════
+CREATE TABLE ingredient_standardise (
+    id_ingredient   SERIAL PRIMARY KEY,
+    nom_canonique   TEXT NOT NULL UNIQUE,
+    nom_ingredient_brut TEXT                          -- texte original avant normalisation
+);
 
--- Trigram indexes speed up case-insensitive substring searches used by
--- Streamlit filters such as LOWER(column) LIKE LOWER('%...%').
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
-CREATE INDEX IF NOT EXISTS idx_produit_nom_trgm
-ON produit USING gin (LOWER(nom_produit) gin_trgm_ops);
+-- ══════════════════════════════════════════════════════════════════
+-- 10. INGREDIENT_SYNONYME
+--     [C-4] Variantes orthographiques / linguistiques d'un ingrédient
+--     Ex: "farine de blé" → "wheat flour" → "farina de trigo"
+-- ══════════════════════════════════════════════════════════════════
+CREATE TABLE ingredient_synonyme (
+    id_synonyme     SERIAL PRIMARY KEY,
+    nom_synonyme    TEXT NOT NULL,
+    langue          CHAR(2),                -- code ISO : 'fr', 'en', 'es'...
+    id_ingredient   INT NOT NULL REFERENCES ingredient_standardise(id_ingredient) ON DELETE CASCADE,
+    UNIQUE (nom_synonyme, langue)
+);
 
-CREATE INDEX IF NOT EXISTS idx_categorie_nom_trgm
-ON categorie USING gin (LOWER(categorie) gin_trgm_ops);
 
-CREATE INDEX IF NOT EXISTS idx_produit_categorie_principale_trgm
-ON produit USING gin (LOWER(COALESCE(categorie_principale, '')) gin_trgm_ops);
+-- ══════════════════════════════════════════════════════════════════
+-- 11. CONTIENT
+--     Relation produit ↔ ingredient_standardise avec attributs
+--     [C-2] PK = id_contient SERIAL (plus robuste)
+--           + UNIQUE (id_produit, ordre) pour garantir l'unicité
+--             de la position dans la liste
+-- ══════════════════════════════════════════════════════════════════
+CREATE TABLE contient (
+    id_contient         SERIAL PRIMARY KEY,             -- [C-2]
+    id_produit          INT NOT NULL REFERENCES produit(id_produit)                   ON DELETE CASCADE,
+    id_ingredient       INT NOT NULL REFERENCES ingredient_standardise(id_ingredient) ON DELETE CASCADE,
+    ordre               INT NOT NULL,                   -- position dans la liste (1=premier)
+    niveau              INT NOT NULL DEFAULT 1,         -- 1=principal, 2=sous-ingrédient...
+    pourcentage         FLOAT CHECK (pourcentage BETWEEN 0 AND 100),
+    UNIQUE (id_produit, ordre)                          -- [C-2] un seul ingrédient par position
+);
 
--- This helps nutrition-based filtering and insights aggregations.
-CREATE INDEX IF NOT EXISTS idx_valeurs_nutritionnelles_sugars
-ON valeurs_nutritionnelles(sugars_100g)
-WHERE sugars_100g IS NOT NULL;
 
-CREATE INDEX IF NOT EXISTS idx_etl_import_history_imported_at ON etl_import_history(imported_at);
-CREATE INDEX IF NOT EXISTS idx_etl_import_history_type_end_ts ON etl_import_history(import_type, source_end_ts);
-CREATE INDEX IF NOT EXISTS idx_produit_similaire_source_type
-ON produit_similaire(code_produit_source, type_recommandation);
+-- ══════════════════════════════════════════════════════════════════
+-- 12. SOUS_INGREDIENT
+--     Hiérarchie multi-niveaux des ingrédients sans récursion SQL.
+--
+--     Principe : deux colonnes de parent mutuellement exclusives
+--       • id_contient_parent  → utilisé pour le NIVEAU 2
+--                               (parent direct = ligne de contient)
+--       • id_sous_parent      → utilisé pour le NIVEAU 3, 4, 5...
+--                               (parent = autre ligne de sous_ingredient)
+--
+--     Exemple A(b1(c1,c2), b2) pour produit A50 :
+--       contient         : (A50, A, ordre=1, niveau=1)
+--       sous_ingredient  : (id_contient=1, NULL,  b1, ordre=1, niveau=2)
+--       sous_ingredient  : (id_contient=1, NULL,  b2, ordre=2, niveau=2)
+--       sous_ingredient  : (NULL, id_sous=1,       c1, ordre=1, niveau=3)
+--       sous_ingredient  : (NULL, id_sous=1,       c2, ordre=2, niveau=3)
+--
+--     La contrainte CHECK garantit exactement un parent renseigné.
+-- ══════════════════════════════════════════════════════════════════
+CREATE TABLE sous_ingredient (
+    id_sous_ingredient      SERIAL PRIMARY KEY,
+
+    -- parent de niveau 1 → pointe vers contient
+    id_contient_parent      INT REFERENCES contient(id_contient) ON DELETE CASCADE,
+
+    -- parent de niveau 2+ → pointe vers sous_ingredient
+    id_sous_parent          INT REFERENCES sous_ingredient(id_sous_ingredient) ON DELETE CASCADE,
+
+    id_ingredient_enfant    INT NOT NULL
+        REFERENCES ingredient_standardise(id_ingredient) ON DELETE CASCADE,
+
+    ordre_enfant            INT NOT NULL DEFAULT 1,
+    niveau                  INT NOT NULL,
+
+    -- contrainte : exactement UN des deux parents doit être renseigné
+    CONSTRAINT chk_un_seul_parent CHECK (
+        (id_contient_parent IS NOT NULL AND id_sous_parent IS NULL)
+        OR
+        (id_contient_parent IS NULL     AND id_sous_parent IS NOT NULL)
+    )
+);
+
+
+-- ══════════════════════════════════════════════════════════════════
+-- INDEX — performances requêtes fréquentes
+-- ══════════════════════════════════════════════════════════════════
+CREATE INDEX idx_produit_marque         ON produit(id_marque);
+CREATE INDEX idx_produit_cat_princ      ON produit(categorie_principale);
+
+CREATE INDEX idx_prodcat_produit        ON produit_categorie(id_produit);
+CREATE INDEX idx_prodcat_categorie      ON produit_categorie(id_categorie);
+
+
+
+
+CREATE INDEX idx_prod_trace_prod        ON produit_trace(id_produit);
+CREATE INDEX idx_prod_trace_trace       ON produit_trace(id_trace);
+CREATE INDEX idx_trace_allergene_trace  ON trace_allergene(id_trace);
+CREATE INDEX idx_trace_allergene_all    ON trace_allergene(id_allergene);
+
+CREATE INDEX idx_contient_produit       ON contient(id_produit);
+CREATE INDEX idx_contient_ingredient    ON contient(id_ingredient);
+CREATE INDEX idx_contient_ordre         ON contient(id_produit, ordre);
+
+CREATE INDEX idx_synonyme_ingredient    ON ingredient_synonyme(id_ingredient);
+CREATE INDEX idx_synonyme_nom           ON ingredient_synonyme(nom_synonyme);
+
+CREATE INDEX idx_sous_contient_parent ON sous_ingredient(id_contient_parent);
+CREATE INDEX idx_sous_si_parent       ON sous_ingredient(id_sous_parent);
+CREATE INDEX idx_sous_enfant          ON sous_ingredient(id_ingredient_enfant);

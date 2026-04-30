@@ -8,6 +8,8 @@ import sys
 import tempfile
 from pathlib import PurePosixPath
 
+from sqlalchemy import create_engine
+
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
@@ -21,7 +23,40 @@ from transform_to_silver import (
     load_normalization_rules,
     write_empty_parquet,
     write_rows_chunk,
+    init_ai,
 )
+
+
+# 🔥 NOUVELLE FONCTION
+def validate_ingredients_with_llm(row):
+    from ingredients_ai.external_llm import call_llm_batch
+
+    ingredients_text = row.get("ingredients_text", [])
+    ingredients_std = row.get("ingredients_standardized", [])
+    ingredients_syn = row.get("ingredients_synonyms", [])
+
+    if not ingredients_text:
+        return row
+
+    print(f"[LLM VALIDATE] INPUT: {ingredients_text}")
+
+    result = call_llm_batch([{
+        "raw": " ".join(ingredients_text),
+        "ingredients": ingredients_text,
+        "mode": "validate"  # 🔥 IMPORTANT
+    }])[0]
+
+    new_std = result.get("ingredients_standardized", ingredients_std)
+    new_syn = result.get("ingredients_synonyms", ingredients_syn)
+
+    print(f"[LLM VALIDATE] STD BEFORE: {ingredients_std}")
+    print(f"[LLM VALIDATE] STD AFTER : {new_std}")
+
+    # 🔥 on modifie UNIQUEMENT ingrédients
+    row["ingredients_standardized"] = new_std
+    row["ingredients_synonyms"] = new_syn
+
+    return row
 
 
 def parse_args():
@@ -29,7 +64,7 @@ def parse_args():
     parser.add_argument("--input-bucket", default=os.getenv("MINIO_BUCKET_SILVER", "silver"))
     parser.add_argument("--input-key", required=True)
     parser.add_argument("--output-bucket", default=os.getenv("MINIO_BUCKET_SILVER", "silver"))
-    parser.add_argument("--output-key", required=True, help="Final silver parquet key used as naming base.")
+    parser.add_argument("--output-key", required=True)
     return parser.parse_args()
 
 
@@ -70,13 +105,25 @@ def second_clean_from_bad(
     output_key: str,
     input_bucket: str | None = None,
     output_bucket: str | None = None,
-    chunk_size: int = 5000,
+    chunk_size: int = 200,
     **_,
 ):
     if input_bucket is None:
         input_bucket = os.getenv("MINIO_BUCKET_SILVER", "silver")
     if output_bucket is None:
         output_bucket = os.getenv("MINIO_BUCKET_SILVER", "silver")
+
+    # ── Init AI
+    postgres_uri = os.getenv("OPENFOOD_POSTGRES_URI")
+    if postgres_uri:
+        try:
+            engine = create_engine(postgres_uri)
+            init_ai(engine)
+            print("[AI] ✅ AI initialisée (second_clean)")
+        except Exception as e:
+            print(f"[AI] ⚠️ Initialisation échouée ({type(e).__name__}: {e}) → ingrédients bruts conservés")
+    else:
+        print("[AI] ⚠️ POSTGRES_URI absent → AI désactivée (second_clean)")
 
     keys = derive_recovery_keys(output_key)
     s3 = get_s3_client()
@@ -134,7 +181,24 @@ def second_clean_from_bad(
                     continue
 
                 stats["rows_input"] += 1
+
+                # 🔥 1. traitement normal (inchangé)
                 row = build_row(product, stats=transform_stats, rules=rules, recovery_mode=True)
+
+                # 🔥 2. récupération du travail du first_clean
+                if "_cleaned_row" in product:
+
+                    cleaned = product["_cleaned_row"]
+                    print("[SECOND CLEAN] Using cleaned_row for ingredients")
+
+                    # 🔥 3. remplacement UNIQUEMENT ingrédients
+                    row["ingredients_text"] = cleaned.get("ingredients_text", row.get("ingredients_text"))
+                    row["ingredients_standardized"] = cleaned.get("ingredients_standardized", row.get("ingredients_standardized"))
+                    row["ingredients_synonyms"] = cleaned.get("ingredients_synonyms", row.get("ingredients_synonyms"))
+
+                    # 🔥 4. validation LLM uniquement ingrédients
+                    row = validate_ingredients_with_llm(row)
+
                 issues = evaluate_final_contract(row)
 
                 if issues:
@@ -148,13 +212,17 @@ def second_clean_from_bad(
 
                 rows_batch.append({column: row.get(column) for column in OUTPUT_COLUMNS})
                 stats["rows_recovered"] += 1
+
                 if len(rows_batch) >= chunk_size:
                     writer = write_rows_chunk(writer, rows_batch, recovered_path)
-                    rows_batch = []
+                    rows_batch.clear()
+                    import gc
+                    gc.collect()
 
         if rows_batch:
             writer = write_rows_chunk(writer, rows_batch, recovered_path)
             rows_batch = []
+
     finally:
         if writer is not None:
             writer.close()
@@ -165,24 +233,22 @@ def second_clean_from_bad(
     try:
         s3.upload_file(recovered_path, output_bucket, keys["recovered_key"])
         s3.upload_file(reject_path, output_bucket, keys["reject_key"])
+
         stats["rules_loaded"] = 0 if rules_source == "defaults" else 1
         stats.update(transform_stats)
 
         print(
             "Second cleaning summary: "
-            f"input={stats['rows_input']}, recovered={stats['rows_recovered']}, rejected={stats['rows_rejected']}, "
-            f"invalid_json={stats['invalid_json_lines']}, empty_lines={stats['empty_lines']}"
+            f"input={stats['rows_input']}, recovered={stats['rows_recovered']}, rejected={stats['rows_rejected']}"
         )
-        print(
-            f"Uploaded second-clean outputs to s3://{output_bucket}/{keys['recovered_key']} "
-            f"and s3://{output_bucket}/{keys['reject_key']}"
-        )
+
         return {
             "recovered_key": keys["recovered_key"],
             "reject_key": keys["reject_key"],
             "output_bucket": output_bucket,
             **stats,
         }
+
     finally:
         for path in (recovered_path, reject_path):
             if os.path.exists(path):

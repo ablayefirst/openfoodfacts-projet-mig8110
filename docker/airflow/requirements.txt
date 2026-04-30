@@ -9,3 +9,20 @@ fastparquet==2023.10.1
 psycopg2-binary==2.9.9
 PyYAML==6.0.2
 scikit-learn==1.4.2
+sqlalchemy<2.0
+ 
+# ── PyTorch CPU ──────────────────────────────────────────────────────
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.0+cpu
+ 
+# ── sentence-transformers : FIXER à 2.7.0 ───────────────────────────
+# sentence-transformers >= 3.x requiert torch >= 2.4 → incompatible avec 2.2.0
+# 2.7.0 est la dernière version compatible avec torch 2.2.x
+sentence-transformers==2.7.0
+ 
+# ── transformers : version stable sans NameError nn ─────────────────
+transformers==4.38.2
+huggingface_hub==0.20.3
+tokenizers==0.15.2
+ 
+openai>=1.0.0

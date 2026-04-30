@@ -9,13 +9,17 @@ import tempfile
 import unicodedata
 from pathlib import Path
 from typing import Any
+AI_CORRECTOR = None
+AI_SYNONYM_MAP = None
+PROCESS_FUNC = None
+GET_CORRECTOR_FUNC = None
+from sqlalchemy import create_engine
 
 import boto3
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from botocore.client import Config
-
 try:
     import yaml
 except ImportError:
@@ -91,12 +95,15 @@ OUTPUT_COLUMNS = [
     "salt_100g",
     "sodium_100g",
     "ingredients_text",
+    "ingredients_standardized",
+    "ingredients_synonyms",     # CORRECTION : manquait dans OUTPUT_COLUMNS
     "allergens_tags",
     "traces_tags",
     "countries",
     "countries_tags",
     "image_url",
     "image_small_url",
+    "image_ingredients_url",   # CORRECTION : manquait dans OUTPUT_COLUMNS
     "image_nutrition_url",
 ]
 
@@ -128,17 +135,46 @@ PARQUET_SCHEMA = pa.schema(
         pa.field("salt_100g", pa.float64()),
         pa.field("sodium_100g", pa.float64()),
         pa.field("ingredients_text", pa.string()),
+        pa.field("ingredients_standardized", pa.string()),  # CORRECTION : manquait dans PARQUET_SCHEMA
+        pa.field("ingredients_synonyms", pa.string()),     # CORRECTION : manquait dans PARQUET_SCHEMA
         pa.field("allergens_tags", pa.list_(pa.string())),
         pa.field("traces_tags", pa.list_(pa.string())),
         pa.field("countries", pa.string()),
         pa.field("countries_tags", pa.list_(pa.string())),
         pa.field("image_url", pa.string()),
         pa.field("image_small_url", pa.string()),
+        pa.field("image_ingredients_url", pa.string()),     # CORRECTION : manquait dans PARQUET_SCHEMA
         pa.field("image_nutrition_url", pa.string()),
     ]
 )
 
 
+
+def init_ai(engine):
+    """
+    Initialise le pipeline AI (embedding + LLM) de manière lazy.
+    Corrections :
+      [C-1] imports groupés dans le même bloc conditionnel
+      [C-2] PROCESS_FUNC pointe vers process() avec la bonne signature (3 args)
+      [C-3] EmbeddingCorrector et db_loader importés dans le même if
+    """
+    global AI_CORRECTOR, AI_SYNONYM_MAP, PROCESS_FUNC
+
+    # Imports lazy — évite de charger sentence_transformers au démarrage Airflow
+    if PROCESS_FUNC is None:
+        from scripts.ingredients_ai.processor import process
+        PROCESS_FUNC = process
+
+    if AI_CORRECTOR is None:
+        from scripts.ingredients_ai.embedding import EmbeddingCorrector
+        from scripts.ingredients_ai.db_loader import load_synonyms_from_db
+
+        reference_map  = load_synonyms_from_db(engine)
+        AI_SYNONYM_MAP = reference_map
+        AI_CORRECTOR   = EmbeddingCorrector(list(reference_map.keys()))
+        print(f"[AI] Corrector initialisé avec {len(reference_map)} ingrédients bruts")
+
+    return AI_CORRECTOR, AI_SYNONYM_MAP
 def parse_args():
     p = argparse.ArgumentParser(description="Transform Bronze JSONL in MinIO to Silver Parquet in MinIO.")
     p.add_argument("--input-bucket", default=os.getenv("MINIO_BUCKET_BRONZE", "bronze"))
@@ -210,21 +246,35 @@ def canonicalize_text(value: Any) -> str | None:
     return txt if txt else None
 
 
-def normalize_token(value: Any, strip_lang_prefix: bool = True) -> str | None:
+def normalize_token(
+    value: Any,
+    strip_lang_prefix: bool = True,
+    keep_parentheses: bool = False
+) -> str | None:
+
     txt = clean_text(value)
     if txt is None:
         return None
+
     txt = txt.lower()
     txt = txt.replace("*", " ")
     txt = txt.replace("•", " ")
+
     if strip_lang_prefix:
         txt = re.sub(r"^[a-z]{2,3}:", "", txt)
-    txt = re.sub(r"\([^)]*\)", " ", txt)
+
+    # 🔥 FIX ICI
+    if not keep_parentheses:
+        txt = re.sub(r"\([^)]*\)", " ", txt)
+
     txt = re.sub(r"\d+(?:[.,]\d+)?\s*%?", " ", txt)
     txt = txt.replace("_", " ")
     txt = re.sub(r"[/+]", " ", txt)
-    txt = re.sub(r"[^a-zàâçéèêëîïôûùüÿñæœ \-']", " ", txt)
+
+    txt = re.sub(r"[^a-zàâçéèêëîïôûùüÿñæœ \-()']", " ", txt)
+
     txt = re.sub(r"\s+", " ", txt).strip(" '\".,;:-")
+
     return canonicalize_text(txt)
 
 
@@ -384,30 +434,40 @@ def apply_rules_to_values(
     values: list[str],
     section_rules: dict[str, Any],
     stats: dict[str, int],
+    is_ingredient: bool = False
 ) -> list[str]:
+
     out = []
     seen = set()
 
     for raw in values:
-        token = normalize_token(raw)
+
+        # 🔥 FIX ICI
+        token = normalize_token(raw, keep_parentheses=is_ingredient)
+
         if token is None:
             continue
 
         if token in section_rules["blacklist_exact"]:
             stats["rule_filtered"] += 1
             continue
+
         if any(flag in token for flag in section_rules["blacklist_contains"]):
             stats["rule_filtered"] += 1
             continue
 
         if section_rules["remove_words"]:
             before = token
+
             for word in section_rules["remove_words"]:
                 token = re.sub(rf"\b{re.escape(word)}\b", " ", token)
+
             token = re.sub(r"\s+", " ", token).strip()
+
             if not token:
                 stats["rule_filtered"] += 1
                 continue
+
             if token != before:
                 stats["rule_replacements"] += 1
 
@@ -585,7 +645,7 @@ def normalize_ingredients_text(
     if raw_ingredients is None:
         return None
 
-    values = split_text_values(raw_ingredients, separators=r"[,;•]")
+    values = split_text_values(raw_ingredients, separators=r"[,;•/]")
     normalized = apply_rules_to_values(values, rules["ingredients"], stats)
     if normalized:
         normalized_text = ", ".join(normalized)
@@ -1091,6 +1151,7 @@ def build_row(
     rules: dict[str, Any],
     recovery_mode: bool = False,
 ) -> dict[str, Any]:
+
     nutriments = product.get("nutriments") or {}
     if not isinstance(nutriments, dict):
         nutriments = {}
@@ -1105,25 +1166,10 @@ def build_row(
 
     nutriscore_grade = normalize_nutrition_grade(product.get("nutriscore_grade"))
     nutriscore_score = clean_int(product.get("nutriscore_score"))
-    if nutriscore_grade is None and nutriscore_score is not None:
-        nutriscore_grade = score_to_grade(nutriscore_score)
-        if nutriscore_grade is not None:
-            stats["nutri_grade_imputed"] += 1
-    if nutriscore_score is None and nutriscore_grade is not None:
-        nutriscore_score = GRADE_TO_SCORE.get(nutriscore_grade)
-        if nutriscore_score is not None:
-            stats["nutri_score_imputed"] += 1
-    elif recovery_mode and not score_matches_grade(nutriscore_grade, nutriscore_score):
-        recovered_grade = score_to_grade(nutriscore_score)
-        if recovered_grade is not None and recovered_grade != nutriscore_grade:
-            nutriscore_grade = recovered_grade
-            stats["nutri_grade_imputed"] += 1
 
     energy_100g = clean_float(nutriments.get("energy_100g"))
     energy_kj_100g = clean_float(nutriments.get("energy-kj_100g"))
     energy_kcal_100g = clean_float(nutriments.get("energy-kcal_100g"))
-    if energy_kcal_100g is None:
-        energy_kcal_100g = clean_float(nutriments.get("energy_kcal_100g"))
 
     energy_100g, energy_kj_100g, energy_kcal_100g = harmonize_energy(
         energy_100g=energy_100g,
@@ -1144,27 +1190,128 @@ def build_row(
         stats,
         recovery_mode=recovery_mode,
     )
-    categorie_principale, _ = classify_primary_category(categories_tags, categories_text, rules, stats)
-    ingredients_text = normalize_ingredients_text(
+
+    categorie_principale, _ = classify_primary_category(
+        categories_tags,
+        categories_text,
+        rules,
+        stats
+    )
+
+    # =========================
+    # 🔥 AI INJECTION (UPDATED)
+    # =========================
+    raw_ingredients = normalize_ingredients_text(
         product,
         rules,
         stats,
         recovery_mode=recovery_mode,
     )
 
+    ingredients_text = raw_ingredients
+    ingredients_standardized = raw_ingredients
+    ingredients_synonyms = None
+
+    def is_valid_ingredients(text):
+        if not text or not isinstance(text, str):
+            return False
+        text = text.strip()
+        if not text:
+            return False
+        cleaned = text.replace(",", "").replace("(", "").replace(")", "").strip()
+        return bool(cleaned)
+
+    if (
+        is_valid_ingredients(raw_ingredients)
+        and AI_CORRECTOR is not None
+        and AI_SYNONYM_MAP is not None
+        and PROCESS_FUNC is not None
+    ):
+        try:
+            # [C-1] Bonne signature : process(text, corrector, synonym_map)
+            ai_result = PROCESS_FUNC(
+                raw_ingredients,
+                AI_CORRECTOR,
+                AI_SYNONYM_MAP,
+            )
+
+            if isinstance(ai_result, dict):
+                ai_text        = ai_result.get("ingredients_text", [])
+                ai_standardized = ai_result.get("ingredients_standardized", [])
+                ai_synonyms    = ai_result.get("ingredients_synonyms", [])
+
+                if isinstance(ai_text, list) and ai_text:
+                    ingredients_text = ", ".join(ai_text)
+
+                if isinstance(ai_standardized, list) and ai_standardized:
+                    ingredients_standardized = " , ".join(ai_standardized)
+                else:
+                    ingredients_standardized = ingredients_text
+
+                # [C-2] Séparateur " ; " pour éviter conflit avec virgule dans les noms
+                # [C-3] Pas de double appel LLM — si synonymes vides, fallback sur standardized
+                if isinstance(ai_synonyms, list):
+
+                    cleaned_synonyms = []
+                    for s in ai_synonyms:
+                        if s and str(s).strip():
+                            val = str(s).strip()
+                            val = val.replace(";", "|").replace(",", "|").replace("/", "|")
+                            parts = [p.strip() for p in val.split("|") if p.strip()]
+                            # remove duplicates
+                            val_clean = "|".join(dict.fromkeys(parts))
+                            cleaned_synonyms.append(val_clean)
+                    if cleaned_synonyms:
+                        # 🔥 FORMAT CORRECT pour load_to_postgres
+                        # Séparateur " , " entre ingrédients, "|" entre synonymes d'un même ingrédient
+                        # [FIX] Séparateur ", " requis par load_to_postgres._parse_synonyms_string
+                        ingredients_synonyms = ", ".join(cleaned_synonyms)
+                    else:
+                        # 🔥 fallback si tout est vide
+                        ingredients_synonyms = ingredients_standardized or raw_ingredients
+
+                else:
+                    # 🔥 fallback total
+                    if ingredients_standardized:
+                        ingredients_synonyms = ingredients_standardized
+                    else:
+                        ingredients_synonyms = raw_ingredients
+
+                stats["ingredients_ai_used"] = stats.get("ingredients_ai_used", 0) + 1
+
+
+        except Exception as e:
+            print(f"[AI] ❌ {code} — {type(e).__name__}: {e}")
+            ingredients_text         = raw_ingredients
+            ingredients_standardized = raw_ingredients
+            ingredients_synonyms     = None
+    else:
+        # AI non disponible ou ingrédients invalides → valeurs brutes conservées
+        ingredients_synonyms = None
+    # =========================
+
     image_url = first_clean_text(
         product.get("image_url"),
         product.get("image_front_url"),
         build_image_from_images(code, product, "front", "400"),
     )
+
     image_small_url = first_clean_text(
         product.get("image_small_url"),
         product.get("image_front_small_url"),
         build_image_from_images(code, product, "front", "100"),
     )
+
     image_nutrition_url = first_clean_text(
         product.get("image_nutrition_url"),
         build_image_from_images(code, product, "nutrition", "400"),
+    )
+
+    # [C-3] image_ingredients_url était dans OUTPUT_COLUMNS/PARQUET_SCHEMA
+    # mais absent du calcul et du return → colonne toujours NULL
+    image_ingredients_url = first_clean_text(
+        product.get("image_ingredients_url"),
+        build_image_from_images(code, product, "ingredients", "400"),
     )
 
     return {
@@ -1194,15 +1341,20 @@ def build_row(
         "proteins_100g": clean_float(nutriments.get("proteins_100g")),
         "salt_100g": salt_100g,
         "sodium_100g": sodium_100g,
+
+        # 🔥 NOUVEAUX CHAMPS
         "ingredients_text": ingredients_text,
+        "ingredients_standardized": ingredients_standardized,
+        "ingredients_synonyms": ingredients_synonyms,
         "allergens_tags": normalize_tag_list(product.get("allergens_tags")),
         "traces_tags": normalize_tag_list(product.get("traces_tags")),
         "countries": clean_text(product.get("countries")),
         "countries_tags": normalize_tag_list(product.get("countries_tags")),
         "image_url": image_url,
         "image_small_url": image_small_url,
+        "image_ingredients_url": image_ingredients_url,
         "image_nutrition_url": image_nutrition_url,
-}
+    }
 
 
 def quantity_is_final(row: dict[str, Any]) -> bool:
@@ -1300,6 +1452,7 @@ def init_transform_stats() -> dict[str, int]:
         "rows_input": 0,
         "rows_output": 0,
         "duplicate_codes": 0,
+        "ingredients_ai_used": 0,
         "duplicates_replaced": 0,
         "rows_without_code": 0,
         "energy_imputed": 0,
@@ -1382,11 +1535,19 @@ def write_rows_chunk(writer: pq.ParquetWriter | None, rows: list[dict[str, Any]]
     return writer
 
 
-def iter_json_lines(streaming_body):
-    for raw_line in streaming_body.iter_lines():
-        if raw_line is None:
-            continue
-        yield raw_line.decode("utf-8", errors="replace")
+def iter_json_lines(streaming_body, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            print(f"[STREAM] Reading stream (attempt {attempt+1})")
+            for raw_line in streaming_body.iter_lines():
+                if raw_line is None:
+                    continue
+                yield raw_line.decode("utf-8", errors="replace")
+            return  # ✅ succès → on sort proprement
+        except Exception as e:
+            print(f"[STREAM ERROR] attempt {attempt+1}: {e}")
+        
+    print("[STREAM ERROR] Max retries reached — stream aborted")
 
 
 def stream_transform_to_parquet(
@@ -1395,13 +1556,19 @@ def stream_transform_to_parquet(
     parquet_path: str,
     chunk_size: int = 5000,
 ) -> dict[str, int]:
+
     parse_stats = init_parse_stats()
     transform_stats = init_transform_stats()
+
+    # 🔥 AJOUT ICI (important)
+    transform_stats["ingredients_ai_used"] = transform_stats.get("ingredients_ai_used", 0)
+
     seen_codes: set[str] = set()
     rows_batch: list[dict[str, Any]] = []
     writer: pq.ParquetWriter | None = None
 
     try:
+        print("[STREAM] Start processing JSONL stream")
         for raw_line in iter_json_lines(body_stream):
             line = raw_line.strip()
             if not line:
@@ -1419,7 +1586,9 @@ def stream_transform_to_parquet(
                 continue
 
             transform_stats["rows_input"] += 1
+
             row = build_row(obj, stats=transform_stats, rules=rules, recovery_mode=True)
+
             code = row.get("code")
             if code is None:
                 transform_stats["rows_without_code"] += 1
@@ -1430,6 +1599,7 @@ def stream_transform_to_parquet(
                 seen_codes.add(code)
 
             rows_batch.append({column: row.get(column) for column in OUTPUT_COLUMNS})
+
             if len(rows_batch) >= chunk_size:
                 writer = write_rows_chunk(writer, rows_batch, parquet_path)
                 transform_stats["rows_output"] += len(rows_batch)
@@ -1438,12 +1608,27 @@ def stream_transform_to_parquet(
         if rows_batch:
             writer = write_rows_chunk(writer, rows_batch, parquet_path)
             transform_stats["rows_output"] += len(rows_batch)
+
     finally:
         if writer is not None:
             writer.close()
 
     if writer is None:
         write_empty_parquet(parquet_path)
+
+    # =========================
+    # 🔥 AJOUT LOGS AI (ICI)
+    # =========================
+    ai_used = transform_stats.get("ingredients_ai_used", 0)
+    total = transform_stats.get("rows_output", 0)
+
+    print(f"AI usage: {ai_used}")
+
+    if total > 0:
+        ratio = ai_used / total
+        print(f"AI usage ratio: {ratio:.2%}")
+
+    # =========================
 
     return {**parse_stats, **transform_stats}
 
@@ -1456,7 +1641,13 @@ def run_transform(
 ) -> dict[str, int]:
     s3 = get_s3_client()
     rules, rules_source = load_normalization_rules()
+    # 🔥 ICI EXACTEMENT
+    engine = create_engine(
+        f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}"
+        f"@{os.getenv('POSTGRES_HOST')}:{os.getenv('POSTGRES_PORT')}/{os.getenv('POSTGRES_DB')}"
+)
 
+    init_ai(engine)
     obj = s3.get_object(Bucket=input_bucket, Key=input_key)
     with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp_file:
         parquet_path = tmp_file.name

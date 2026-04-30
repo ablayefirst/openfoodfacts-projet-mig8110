@@ -1,0 +1,41 @@
+On extrait le champ des catégories sous forme de liste ordonnée 
+(par exemple "A, B, C"), puis on considère la première valeur comme la 
+catégorie principale, que l’on insère directement dans la table produit ainsi que
+ dans la table categorie (en évitant les doublons). Ensuite, pour chaque catégorie 
+de la liste, on l’insère (ou on récupère son identifiant) dans la table categorie, 
+puis on remplit la table de jointure produit_categorie en associant le code_produit 
+avec l’id_categorie correspondant, tout en attribuant un niveau basé sur sa position
+ dans la liste (1 pour la première, 2 pour la suivante, etc.). Cela permet de conserver
+ l’ordre hiérarchique des catégories sans dupliquer l’information.
+
+c'est categorie
+
+
+Pour gérer les ingrédients, on utilise les deux sorties du modèle (LLM) : 
+la liste des ingrédients bruts (a, b, c) et leur version standardisée correspondante 
+(a1, b1, c1), en respectant strictement l’ordre pour garantir la correspondance. 
+Chaque ingrédient standardisé (comme a1) est d’abord inséré dans la table 
+ingredient_standardise (en évitant les doublons), puis on récupère son identifiant. 
+Ensuite, chaque ingrédient brut (comme a) est inséré dans la table 
+ingredient_similaire avec une clé étrangère pointant vers son ingrédient
+ standardisé (a1). Cela permet de relier plusieurs variantes d’un même ingrédient 
+à une forme canonique unique, tout en conservant les données d’origine pour 
+l’analyse et le traitement.
+
+ingrédient similaire et ingrédient standardisé
+
+Enfin, la relation entre les produits et leurs ingrédients est enregistrée 
+dans la table produit_ingredient_similaire. Chaque ingrédient est associé à un 
+produit via son identifiant, avec un attribut ordre qui représente sa position 
+dans la liste (par exemple, pour A, B, C, les ordres sont respectivement 1, 2 et 3). 
+Cette approche garantit la conservation de la structure et de l’ordre des 
+ingrédients tout en maintenant un modèle simple et efficace.
+
+ordre des ingrédient dans  produit_ingredient_similaire
+
+CREATE INDEX IF NOT EXISTS idx_produit_marque         ON produit(id_marque);
+CREATE INDEX IF NOT EXISTS idx_produit_cat            ON produit_categorie(id_categorie);
+CREATE INDEX IF NOT EXISTS idx_produit_trace          ON produit_trace(id_trace);
+CREATE INDEX IF NOT EXISTS idx_ing_sim_standard       ON ingredient_similaire(id_ingredient_standard);
+CREATE INDEX IF NOT EXISTS idx_ing_std_allergene      ON produit_allergene(id_allergene);                 -- CORRECTION : nom de table mis à jour
+CREATE INDEX IF NOT EXISTS idx_pis_ing_sim            ON produit_ingredient_similaire(id_ingredient_similaire);  
