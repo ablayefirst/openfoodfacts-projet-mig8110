@@ -1,30 +1,29 @@
-from html import escape
 import sys
 from pathlib import Path
+from html import escape
 
 import streamlit as st
 import pandas as pd
 import warnings
-
-def get_no_image_data_uri():
-    return None
 
 APP_DIR = Path(__file__).resolve().parents[1]
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from db_connection import get_connection
+from image_utils import get_no_image_data_uri
 from top_menu import render_top_menu
+from ui_hero import render_page_hero
 
 st.set_page_config(page_title="Détail produit", layout="wide", initial_sidebar_state="collapsed")
 
 render_top_menu("Dashboard")
 
-st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
-
-st.title("Détail du produit")
-
-st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
+render_page_hero(
+    kicker="Analyse produit",
+    title="Detail du produit",
+    subtitle="Consultez la fiche complete, les donnees nutritionnelles et les alternatives recommandees.",
+)
 
 conn = get_connection()
 
@@ -135,7 +134,6 @@ if code is None:
 
 st.session_state.pop("detail_reco_error", None)
 
-# synchronisation de l'URL
 try:
     current_qp = st.query_params.get("code", None)
 except AttributeError:
@@ -277,14 +275,12 @@ RECOMMENDATION_COLUMNS = [
     "categorie_principale",
 ]
 
-
 def read_optional_recommendations(query: str, product_code: str, selected_method: str) -> pd.DataFrame:
     try:
         return pd.read_sql(query, conn, params=(product_code, selected_method))
     except Exception as exc:
         st.session_state["detail_reco_error"] = str(exc)
         return pd.DataFrame(columns=RECOMMENDATION_COLUMNS)
-
 
 detail_df = pd.read_sql(DETAIL_QUERY, conn, params=(code,))
 
@@ -305,6 +301,7 @@ healthier_df = read_optional_recommendations(
     code,
     selected_healthier_method
 )
+
 # ==============================
 # FICHE PRODUIT (AFFICHÉE AVANT ANALYSE)
 # ==============================
@@ -582,7 +579,6 @@ with right_col:
     st.markdown("</div>", unsafe_allow_html=True)
 
 st.markdown("---")
-
 
 # ==============================
 # VARIABLES NUTRITIONNELLES
@@ -997,16 +993,16 @@ else:
 
 if niveau_risque == "élevé":
     status_class = "status-bad"
-    status_text = "Risque élevé"
-    score_hint = "Produit à consommer avec modération."
+    status_text = "Risque eleve"
+    score_hint = "Produit a consommer avec moderation."
 elif niveau_risque == "modéré":
     status_class = "status-mid"
-    status_text = "Risque modéré"
+    status_text = "Risque modere"
     score_hint = "Produit acceptable avec quelques limites nutritionnelles."
 elif niveau_risque == "bon":
     status_class = "status-good"
     status_text = "Bon profil"
-    score_hint = "Produit globalement intéressant sur le plan nutritionnel."
+    score_hint = "Produit globalement interessant sur le plan nutritionnel."
 else:
     status_class = "status-good"
     status_text = "Très bon profil"
@@ -1018,73 +1014,68 @@ else:
 
 alerts_html = ""
 for level, message in alerts:
-    alerts_html += f"<li class='alert-item {level}'>{escape(str(message))}</li>"
+    alerts_html += f"<li class='alert-item {level}'>{escape(message)}</li>"
 
 if not alerts_html:
-    alerts_html = "<li class='alert-item success'>Aucune alerte nutritionnelle majeure détectée.</li>"
+    alerts_html = "<li class='alert-item success'>Aucune alerte nutritionnelle majeure detectee.</li>"
 
 exp_html = ""
 if explications:
     for exp in explications:
-        exp_html += f"<li>{escape(str(exp))}</li>"
+        exp_html += f"<li>{escape(exp)}</li>"
+else:
+    exp_html = "<li>Aucune explication additionnelle.</li>"
+exp_html = ""
+if explications:
+    for exp in explications:
+        exp_html += f"<li>{escape(exp)}</li>"
 else:
     exp_html = "<li>Aucune explication additionnelle.</li>"
 
 st.markdown("## Analyse nutritionnelle", unsafe_allow_html=True)
 analysis_col1, analysis_col2, analysis_col3 = st.columns([0.33, 0.33, 0.34])
 
-col_title = st.columns([0.8, 0.2])[0]
+with analysis_col1:
+    st.markdown(
+        f"""
+        <div class='analysis-card'>
+            <p class='analysis-title'>Score sante</p>
+            <p class='analysis-sub'>Evaluation globale inspiree des recommandations OMS</p>
+            <p class='score-big'>{round(score, 2)} <span style='font-size:1rem; font-weight:700; color:#64748b;'>/ 100</span></p>
+            <span class='status-chip {status_class}'>{status_text}</span>
+            <p style='margin:0.35rem 0 0; color:#334155; font-size:0.9rem;'>{score_hint}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-with col_title:
-    st.subheader(f"{row['product_name']}")
-    st.caption(f"Code produit : {row['code']}")
+with analysis_col2:
+    st.markdown(
+        f"""
+        <div class='analysis-card'>
+            <p class='analysis-title'>Alertes cles</p>
+            <p class='analysis-sub'>Points sensibles detectes sur sucre, sel, graisses, NOVA et NutriScore</p>
+            <ul class='alert-list'>
+                {alerts_html}
+            </ul>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-# ==============================
-# AFFICHAGE PRINCIPAL
-# ==============================
-
-col_img, col_info = st.columns([0.6, 0.6])
-
-with col_img:
-    main_img = row.get("image_url") or row.get("image_small_url") or row.get("image_nutrition_url")
-    if pd.notna(main_img) and str(main_img).strip() != "":
-        st.image(str(main_img), width=420)
-
-    if pd.notna(row.get("url")) and str(row.get("url")).strip() != "":
-        st.markdown(f"[Fiche OpenFoodFacts]({row['url']})")
-
-with col_info:
-    categorie_principale_display = row.get("categorie_principale", "autres")
-    if pd.isna(categorie_principale_display) or str(categorie_principale_display).strip() == "":
-        categorie_principale_display = "autres"
-
-    st.markdown(f"**Marque :** {row.get('brand', 'Non spécifiée')}")
-    st.markdown(f"**Quantité :** {row.get('quantite', 'Non spécifiée')}")
-    st.markdown(f"**Catégorie principale :** {categorie_principale_display}")
-    st.markdown(f"**Catégories :** {row.get('categories', 'Non spécifiée')}")
-    st.markdown(f"**Pays :** {row.get('countries', 'Non spécifiés')}")
-    st.markdown(f"**NutriScore :** {row.get('nutrition_grade', 'N/A')} (score {row.get('nutriscore_score', 'N/A')})")
-    st.markdown(f"**Groupe NOVA :** {row.get('nova_group', 'N/A')}")
-
-    st.markdown("---")
-    st.markdown("**Détails nutritionnels (pour 100g)**")
-    st.markdown(f"- Glucides : {row.get('carbohydrates_100g', 'N/A')} g")
-    st.markdown(f"- Graisses : {row.get('fat_100g', 'N/A')} g (dont saturées {row.get('saturated_fat_100g', 'N/A')} g)")
-    st.markdown(f"- Sucre : {row.get('sugars_100g', 'N/A')} g")
-    st.markdown(f"- Fibres : {row.get('fiber_100g', 'N/A')} g")
-    st.markdown(f"- Protéines : {row.get('proteins_100g', 'N/A')} g")
-    st.markdown(f"- Sel : {row.get('salt_100g', 'N/A')} g")
-
-st.markdown("---")
-
-st.markdown("**Ingrédients**")
-st.write(row.get("ingredients", "Non spécifiés"))
-
-st.markdown("**Allergènes**")
-st.write(row.get("allergens", "Non spécifiés"))
-
-st.markdown("**Labels**")
-st.write(row.get("labels", "Non spécifiés"))
+with analysis_col3:
+    st.markdown(
+        f"""
+        <div class='analysis-card'>
+            <p class='analysis-title'>Explication</p>
+            <p class='analysis-sub'>Lecture detaillee des facteurs qui influencent le score</p>
+            <ul class='exp-list'>
+                {exp_html}
+            </ul>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 # ==============================
 # MESSAGE SI RIEN N'EST COCHÉ
@@ -1092,32 +1083,6 @@ st.write(row.get("labels", "Non spécifiés"))
 
 if show_recommendations_warning:
     st.warning("Veuillez sélectionner au moins un type de recommandation pour afficher les suggestions.")
-st.markdown("---")
-st.markdown("## 🔍 Produits similaires")
-st.caption("Produits proches en composition et en catégorie.")
-
-if st.session_state.get("detail_reco_error"):
-    st.info("Les recommandations similaires ne sont pas encore disponibles dans cette base de données.")
-
-if similar_df.empty:
-    st.info("Aucun produit similaire trouvé.")
-else:
-    for _, sim in similar_df.iterrows():
-        col1, col2 = st.columns([0.25, 0.75])
-
-        with col1:
-            sim_img = sim.get("image_url") or sim.get("image_small_url")
-            if pd.notna(sim_img) and str(sim_img).strip() != "":
-                st.image(str(sim_img), width=120)
-
-        with col2:
-            st.markdown(f"### {sim.get('nom_produit', 'Produit sans nom')}")
-            st.markdown(f"**Score de similarité :** {sim.get('score_similarite', 0)}")
-            st.markdown(f"**Catégorie :** {sim.get('categorie_principale', 'Non spécifiée')}")
-            st.markdown(f"**NutriScore :** {sim.get('nutrition_grade', 'N/A')}")
-            st.markdown(f"**Groupe NOVA :** {sim.get('nova_group', 'N/A')}")
-            st.markdown(f"**Ingrédients communs :** {sim.get('ingredients_communs', 'Aucun')}")
-            st.markdown(f"**Nombre d’ingrédients communs :** {sim.get('nb_ingredients_communs', 0)}")
 
 # ==============================
 # PRODUITS SIMILAIRES
