@@ -74,10 +74,9 @@ SELECT
             ', '
         ),
         ''
-    ) AS ingredients_text
+    ) AS ingredients_text,
     v.carbohydrates_100g,
-    v.fat_100g,
-    COALESCE(string_agg(DISTINCT ing.ingredients_nom, ', '), '') AS ingredients_text
+    v.fat_100g
 FROM produit p
 LEFT JOIN valeurs_nutritionnelles v ON p.code_produit = v.code_produit
 LEFT JOIN produit_ingredient pi ON p.code_produit = pi.code_produit
