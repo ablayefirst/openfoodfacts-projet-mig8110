@@ -1568,7 +1568,7 @@ def _admin_header() -> None:
 
 
 def _admin_section_nav(active_section: str) -> None:
-    nav_catalog, nav_rejections, nav_new, _ = st.columns([1.2, 1.4, 1.1, 3.1])
+    nav_catalog, nav_rejections, nav_synonyms, nav_new, _ = st.columns([1.2, 1.4, 1.5, 1.1, 1.6])
 
     with nav_catalog:
         if st.button(
@@ -1585,6 +1585,14 @@ def _admin_section_nav(active_section: str) -> None:
             use_container_width=True,
         ) and active_section != "rejections":
             _set_admin_mode("reject_list")
+
+    with nav_synonyms:
+        if st.button(
+            "Synonymes",
+            type="primary" if active_section == "synonyms" else "secondary",
+            use_container_width=True,
+        ) and active_section != "synonyms":
+            _set_admin_mode("synonyms")
 
     with nav_new:
         if st.button("Ajouter", type="secondary", use_container_width=True):
@@ -2989,6 +2997,306 @@ def _delete_ui(code: str | None):
 
 
 # =========================
+# Synonymes LLM
+# =========================
+def _synonymes_ui() -> None:
+    _TYPE_STYLES = {
+        "exact":      ("🟢", "#dcfce7", "#14532d"),
+        "traduction": ("🔵", "#dbeafe", "#1e3a5f"),
+        "correction": ("🟠", "#ffedd5", "#7c2d12"),
+        "variante":   ("⚪", "#f1f5f9", "#334155"),
+    }
+
+    st.markdown("""
+    <style>
+    .syn-kpi-card {
+        background: radial-gradient(300px 120px at 10% 0%, rgba(20,184,166,0.10), transparent 80%),
+                    radial-gradient(260px 100px at 90% 100%, rgba(245,158,11,0.08), transparent 80%),
+                    #ffffff;
+        border: 1px solid rgba(15,118,110,0.18);
+        border-radius: 14px;
+        padding: 1.1rem 1.4rem;
+        text-align: center;
+    }
+    .syn-kpi-label {
+        font-size: 0.75rem;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: #0f766e;
+        margin-bottom: 0.3rem;
+    }
+    .syn-kpi-value {
+        font-size: 2rem;
+        font-weight: 800;
+        color: #0f172a;
+        line-height: 1.1;
+    }
+    .syn-type-badge {
+        display: inline-block;
+        padding: 0.2rem 0.7rem;
+        border-radius: 999px;
+        font-size: 0.75rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+    }
+    .syn-table-wrap {
+        border: 1px solid rgba(15,118,110,0.15);
+        border-radius: 12px;
+        overflow: hidden;
+        margin-top: 0.8rem;
+    }
+    .syn-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    .syn-table thead th {
+        background: rgba(15,118,110,0.07);
+        color: #0f766e;
+        font-weight: 700;
+        font-size: 0.72rem;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        padding: 0.65rem 1rem;
+        border-bottom: 1px solid rgba(15,118,110,0.15);
+        text-align: left;
+    }
+    .syn-table tbody tr { border-bottom: 1px solid #f1f5f9; }
+    .syn-table tbody tr:last-child { border-bottom: none; }
+    .syn-table tbody tr:hover { background: rgba(20,184,166,0.04); }
+    .syn-table td { padding: 0.55rem 1rem; color: #1e293b; vertical-align: middle; }
+    .syn-table td.muted { color: #64748b; font-size: 0.83rem; }
+    .conf-bar-wrap { background: #e2e8f0; border-radius: 999px; height: 6px; width: 80px; display: inline-block; vertical-align: middle; margin-right: 6px; }
+    .conf-bar-fill { height: 6px; border-radius: 999px; background: #0f766e; }
+    .syn-filter-box {
+        background: #f8fafc;
+        border: 1px solid rgba(15,118,110,0.12);
+        border-radius: 12px;
+        padding: 0.9rem 1.1rem 0.3rem 1.1rem;
+        margin-bottom: 0.8rem;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    _admin_section_nav("synonyms")
+
+    st.markdown("""
+    <div style="margin-bottom:1.2rem;">
+        <div style="font-size:0.78rem;font-weight:700;letter-spacing:0.07em;text-transform:uppercase;color:#0f766e;margin-bottom:0.2rem;">
+            Intelligence des ingrédients
+        </div>
+        <div style="font-size:1.55rem;font-weight:800;color:#0f172a;line-height:1.2;">
+            Synonymes ingrédients
+        </div>
+        <div style="font-size:0.9rem;color:#64748b;margin-top:0.3rem;">
+            Correspondances générées par clustering, LLM ou saisie manuelle.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    db = SessionLocal()
+    try:
+        total_row = db.execute(text(
+            "SELECT COUNT(*) FROM synonyme_ingredient WHERE nom_synonyme IS NOT NULL AND TRIM(nom_synonyme) <> ''"
+        )).scalar() or 0
+
+        canon_row = db.execute(text(
+            """
+            SELECT
+                COUNT(DISTINCT id_standardise)
+                + COUNT(DISTINCT CASE WHEN id_standardise IS NULL THEN id_ingredient END)
+            FROM synonyme_ingredient
+            WHERE nom_synonyme IS NOT NULL
+            """
+        )).scalar() or 0
+
+        llm_row = db.execute(text(
+            "SELECT COUNT(*) FROM synonyme_ingredient WHERE source = 'llm'"
+        )).scalar() or 0
+
+        traites_row = db.execute(text(
+            """
+            SELECT
+                COUNT(DISTINCT id_standardise)
+                + COUNT(DISTINCT CASE WHEN id_standardise IS NULL THEN id_ingredient END)
+            FROM synonyme_ingredient
+            WHERE source = 'llm'
+            """
+        )).scalar() or 0
+
+        m1, m2, m3, m4 = st.columns(4)
+        for col, label, value, sub in [
+            (m1, "Traités ce run", int(traites_row), None),
+            (m2, "Total synonymes", int(total_row), None),
+            (m3, "Canoniques couverts", int(canon_row), None),
+            (m4, "Générés par LLM", int(llm_row), None),
+        ]:
+            sub_html = f'<div style="font-size:0.72rem;color:#64748b;margin-top:0.25rem;">{sub}</div>' if sub else ""
+            col.markdown(f"""
+            <div class="syn-kpi-card">
+                <div class="syn-kpi-label">{label}</div>
+                <div class="syn-kpi-value">{value}</div>
+                {sub_html}
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown("<div style='margin:1.2rem 0 0.4rem 0;font-size:0.75rem;font-weight:700;letter-spacing:0.07em;text-transform:uppercase;color:#475569;'>Répartition par type</div>", unsafe_allow_html=True)
+
+        dist_rows = db.execute(text(
+            """
+            SELECT COALESCE(relation_type, 'exact') AS rtype, COUNT(*) AS cnt
+            FROM synonyme_ingredient
+            GROUP BY rtype
+            ORDER BY cnt DESC
+            """
+        )).all()
+
+        if dist_rows:
+            type_cols = st.columns(len(dist_rows))
+            type_labels = {"exact": "Exact", "traduction": "Traduction", "correction": "Correction", "variante": "Variante"}
+            for col, row in zip(type_cols, dist_rows):
+                emoji, bg, fg = _TYPE_STYLES.get(row[0], ("⚪", "#f1f5f9", "#334155"))
+                col.markdown(f"""
+                <div style="background:{bg};border-radius:12px;padding:0.8rem 1rem;text-align:center;">
+                    <div style="font-size:1.4rem;margin-bottom:0.2rem;">{emoji}</div>
+                    <div style="font-size:0.72rem;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:{fg};margin-bottom:0.25rem;">{type_labels.get(row[0], row[0])}</div>
+                    <div style="font-size:1.5rem;font-weight:800;color:{fg};">{int(row[1])}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        st.markdown("<div style='margin:1.4rem 0 0 0;'></div>", unsafe_allow_html=True)
+
+        st.markdown('<div class="syn-filter-box">', unsafe_allow_html=True)
+        f1, f2, f3 = st.columns([2, 1, 1])
+        with f1:
+            search_q = st.text_input("Recherche (synonyme ou canonique)", value="", placeholder="ex: egg, ail, wheat...")
+        with f2:
+            type_filter = st.selectbox("Type", ["Tous", "exact", "traduction", "correction", "variante"])
+        with f3:
+            source_filter = st.selectbox("Source", ["Tous", "cluster", "llm", "manual"])
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        where_clauses = [
+            "si.nom_synonyme IS NOT NULL",
+            "TRIM(si.nom_synonyme) <> ''",
+        ]
+        params: dict = {}
+
+        if search_q.strip():
+            where_clauses.append(
+                "(LOWER(si.nom_synonyme) LIKE :q OR LOWER(COALESCE(ist.nom_standardise, i.ingredients_nom, '')) LIKE :q)"
+            )
+            params["q"] = f"%{search_q.strip().lower()}%"
+
+        if type_filter != "Tous":
+            where_clauses.append("COALESCE(si.relation_type, 'exact') = :rtype")
+            params["rtype"] = type_filter
+
+        if source_filter != "Tous":
+            where_clauses.append("COALESCE(si.source, 'manual') = :source")
+            params["source"] = source_filter
+
+        where_sql = " AND ".join(where_clauses)
+
+        count_total = db.execute(text(
+            f"""
+            SELECT COUNT(*)
+            FROM synonyme_ingredient si
+            LEFT JOIN ingredient i ON i.id_ingredient = si.id_ingredient
+            LEFT JOIN ingredient_standardise ist ON ist.id_standardise = si.id_standardise
+            WHERE {where_sql}
+            """
+        ), params).scalar() or 0
+
+        per_page = 50
+        page = int(st.session_state.get("syn_page", 1))
+        total_pages = max(1, (int(count_total) + per_page - 1) // per_page)
+        if page > total_pages:
+            page = total_pages
+            st.session_state["syn_page"] = page
+
+        rows = db.execute(text(
+            f"""
+            SELECT
+                si.nom_synonyme,
+                COALESCE(ist.nom_standardise, i.ingredients_nom) AS canonique,
+                COALESCE(si.relation_type, 'exact') AS type_rel,
+                si.confidence,
+                COALESCE(si.source, 'manual') AS source
+            FROM synonyme_ingredient si
+            LEFT JOIN ingredient i ON i.id_ingredient = si.id_ingredient
+            LEFT JOIN ingredient_standardise ist ON ist.id_standardise = si.id_standardise
+            WHERE {where_sql}
+            ORDER BY si.confidence DESC NULLS LAST, si.nom_synonyme
+            LIMIT :lim OFFSET :off
+            """
+        ), {**params, "lim": per_page, "off": (page - 1) * per_page}).all()
+
+        st.markdown(
+            f"<div style='font-size:0.82rem;color:#64748b;margin:0.6rem 0 0.4rem 0;'>"
+            f"<b>{int(count_total)}</b> résultats — page <b>{page}</b> / <b>{total_pages}</b>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        if rows:
+            rows_html = ""
+            for r in rows:
+                emoji, bg, fg = _TYPE_STYLES.get(r[2], ("⚪", "#f1f5f9", "#334155"))
+                badge = f'<span class="syn-type-badge" style="background:{bg};color:{fg};">{emoji} {r[2]}</span>'
+                conf_val = float(r[3]) if r[3] is not None else 0.0
+                conf_pct = int(conf_val * 100)
+                conf_html = (
+                    f'<div class="conf-bar-wrap"><div class="conf-bar-fill" style="width:{conf_pct}%;"></div></div>'
+                    f'<span style="font-size:0.82rem;color:#475569;">{conf_val:.2f}</span>'
+                )
+                if r[4] == "llm":
+                    source_badge = '<span style="background:#ede9fe;color:#4c1d95;padding:0.15rem 0.5rem;border-radius:999px;font-size:0.72rem;font-weight:700;">LLM</span>'
+                elif r[4] == "cluster":
+                    source_badge = '<span style="background:#ccfbf1;color:#115e59;padding:0.15rem 0.5rem;border-radius:999px;font-size:0.72rem;font-weight:700;">cluster</span>'
+                else:
+                    source_badge = '<span style="background:#f1f5f9;color:#475569;padding:0.15rem 0.5rem;border-radius:999px;font-size:0.72rem;font-weight:600;">manuel</span>'
+                rows_html += f"""
+                <tr>
+                    <td><b>{r[0]}</b></td>
+                    <td style="color:#0f766e;font-weight:600;">→ {r[1]}</td>
+                    <td>{badge}</td>
+                    <td>{conf_html}</td>
+                    <td>{source_badge}</td>
+                </tr>"""
+
+            st.markdown(f"""
+            <div class="syn-table-wrap">
+                <table class="syn-table">
+                    <thead>
+                        <tr>
+                            <th>Synonyme</th>
+                            <th>Canonique</th>
+                            <th>Type</th>
+                            <th>Confiance</th>
+                            <th>Source</th>
+                        </tr>
+                    </thead>
+                    <tbody>{rows_html}</tbody>
+                </table>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.info("Aucun synonyme trouvé avec ces filtres.")
+
+        st.markdown("<div style='margin-top:1rem;'></div>", unsafe_allow_html=True)
+        p1, p2, p3 = st.columns([1, 4, 1])
+        with p1:
+            if st.button("◀ Précédent", disabled=page <= 1):
+                st.session_state["syn_page"] = page - 1
+                st.rerun()
+        with p3:
+            if st.button("Suivant ▶", disabled=page >= total_pages):
+                st.session_state["syn_page"] = page + 1
+                st.rerun()
+
+    finally:
+        db.close()
+
+
+# =========================
 # Entry point
 # =========================
 def run_admin():
@@ -3017,6 +3325,9 @@ def run_admin():
 
     elif mode == "reject_edit":
         _rejected_product_form_ui(rejected_id=st.session_state.get("admin_rejected_id"))
+
+    elif mode == "synonyms":
+        _synonymes_ui()
 
     else:
         st.session_state["admin_mode"] = "list"

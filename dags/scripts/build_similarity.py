@@ -35,6 +35,7 @@ SIMILARITY_MODES = [
     "profil_nutritionnel",
     "score_nutritionnel_global",
     "niveau_transformation_nova",
+    "similitude_ingredients",
 ]
 
 RECOMMENDATION_TYPES = [
@@ -46,6 +47,7 @@ RECOMMENDATION_TYPES = [
 PROFILE_NUTRITIONNEL_MIN_SCORE = 0.35
 SCORE_NUTRITIONNEL_GLOBAL_MIN_SCORE = 0.50
 NIVEAU_TRANSFORMATION_NOVA_MIN_SCORE = 0.50
+SIMILITUDE_INGREDIENTS_MIN_SCORE = 0.15
 
 # Seuils santé
 MIN_HEALTH_GAIN = 3.0
@@ -68,24 +70,18 @@ SELECT
     v.saturated_fat_100g,
     v.fiber_100g,
     v.proteins_100g,
-    COALESCE(
-        string_agg(
-            DISTINCT COALESCE(ing_canon.ingredients_nom, ing.ingredients_nom),
-            ', '
-        ),
-        ''
-    ) AS ingredients_text,
     v.carbohydrates_100g,
-    v.fat_100g
+    v.fat_100g,
+    COALESCE(
+        string_agg(DISTINCT il.nom_canonique, ', '),
+        ''
+    ) AS ingredients_text
 FROM produit p
 LEFT JOIN valeurs_nutritionnelles v ON p.code_produit = v.code_produit
 LEFT JOIN produit_ingredient pi ON p.code_produit = pi.code_produit
 LEFT JOIN ingredient ing ON pi.id_ingredient = ing.id_ingredient
-LEFT JOIN synonyme_ingredient si
-    ON LOWER(TRIM(si.nom_synonyme)) = LOWER(TRIM(ing.ingredients_nom))
-   AND COALESCE(si.relation_type, 'exact') IN ('exact', 'traduction', 'correction')
-LEFT JOIN ingredient ing_canon
-    ON si.id_ingredient = ing_canon.id_ingredient
+LEFT JOIN ingredient_lookup il
+    ON LOWER(TRIM(il.nom_recherche_normalise)) = LOWER(TRIM(ing.ingredients_nom))
 GROUP BY
     p.code_produit,
     p.nom_produit,
@@ -413,6 +409,10 @@ def nova_similarity(a, b):
     return round(max(0, score), 4)
 
 
+def ingredient_jaccard_similarity(a, b):
+    return round(jaccard_from_sets(a["ingredients_set"], b["ingredients_set"]), 4)
+
+
 def compute_similarity_by_mode(a, b, mode):
     if mode == "meme_categorie":
         return category_similarity(a, b)
@@ -425,6 +425,9 @@ def compute_similarity_by_mode(a, b, mode):
 
     if mode == "niveau_transformation_nova":
         return nova_similarity(a, b)
+
+    if mode == "similitude_ingredients":
+        return ingredient_jaccard_similarity(a, b)
 
     return 0.0
 
@@ -441,6 +444,9 @@ def passes_similarity_threshold(mode, score):
 
     if mode == "niveau_transformation_nova":
         return score >= NIVEAU_TRANSFORMATION_NOVA_MIN_SCORE
+
+    if mode == "similitude_ingredients":
+        return score >= SIMILITUDE_INGREDIENTS_MIN_SCORE
 
     return False
 
@@ -728,6 +734,16 @@ def is_healthier_by_mode(a, b, mode):
 
             return True
 
+        elif mode == "similitude_ingredients":
+            jac = jaccard_from_sets(a["ingredients_set"], b["ingredients_set"])
+            if jac < SIMILITUDE_INGREDIENTS_MIN_SCORE:
+                return False
+
+            if (b["health_score"] - a["health_score"]) < MIN_HEALTH_GAIN:
+                return False
+
+            return True
+
         return is_healthier(
             a["nutrition_grade"],
             b["nutrition_grade"],
@@ -871,7 +887,15 @@ def build_similarity_recommendations(**_):
     rows_dict = [build_product_dict(r) for r in rows]
     n = len(rows)
 
-    all_results = []
+    # Ouvrir la connexion et vider la table AVANT la boucle
+    raw_conn = engine.connect()
+    raw_conn.execute(text("BEGIN"))
+    ensure_similarity_table(raw_conn)
+    raw_conn.execute(text("DELETE FROM produit_similaire"))
+
+    total_inserted = 0
+    mode_stats = {mode: {"similaire": 0, "plus_saine": 0} for mode in SIMILARITY_MODES}
+    PK_COLS = ["code_produit_source", "code_produit_cible", "type_recommandation"]
 
     # ==============================
     # 5. Boucle unique sur les paires
@@ -880,6 +904,7 @@ def build_similarity_recommendations(**_):
     for i in range(n):
         a = rows[i]
         a_data = rows_dict[i]
+        i_results = []  # résultats pour ce produit source uniquement
 
         for j in range(n):
             if i == j:
@@ -910,7 +935,7 @@ def build_similarity_recommendations(**_):
             score_meme_categorie = compute_similarity_by_mode(a_data, b_data, "meme_categorie")
 
             if passes_similarity_threshold("meme_categorie", score_meme_categorie):
-                all_results.append(
+                i_results.append(
                     make_result_row(
                         a=a,
                         b=b,
@@ -927,7 +952,7 @@ def build_similarity_recommendations(**_):
             score_profil_nutritionnel = compute_similarity_by_mode(a_data, b_data, "profil_nutritionnel")
 
             if passes_similarity_threshold("profil_nutritionnel", score_profil_nutritionnel):
-                all_results.append(
+                i_results.append(
                     make_result_row(
                         a=a,
                         b=b,
@@ -944,7 +969,7 @@ def build_similarity_recommendations(**_):
             score_score_nutritionnel_global = compute_similarity_by_mode(a_data, b_data, "score_nutritionnel_global")
 
             if passes_similarity_threshold("score_nutritionnel_global", score_score_nutritionnel_global):
-                all_results.append(
+                i_results.append(
                     make_result_row(
                         a=a,
                         b=b,
@@ -961,7 +986,7 @@ def build_similarity_recommendations(**_):
             score_niveau_transformation_nova = compute_similarity_by_mode(a_data, b_data, "niveau_transformation_nova")
 
             if passes_similarity_threshold("niveau_transformation_nova", score_niveau_transformation_nova):
-                all_results.append(
+                i_results.append(
                     make_result_row(
                         a=a,
                         b=b,
@@ -970,6 +995,23 @@ def build_similarity_recommendations(**_):
                         commons_sorted=commons_sorted,
                         methode="niveau_transformation_nova",
                         mode_sante="niveau_transformation_nova",
+                        type_recommandation="similaire"
+                    )
+                )
+
+            # MODE 5 : SIMILARITÉ INGRÉDIENTS (Jaccard sur formes canoniques)
+            score_similitude_ingredients = compute_similarity_by_mode(a_data, b_data, "similitude_ingredients")
+
+            if passes_similarity_threshold("similitude_ingredients", score_similitude_ingredients):
+                i_results.append(
+                    make_result_row(
+                        a=a,
+                        b=b,
+                        score=score_similitude_ingredients,
+                        nb_commons=nb_commons,
+                        commons_sorted=commons_sorted,
+                        methode="similitude_ingredients",
+                        mode_sante="similitude_ingredients",
                         type_recommandation="similaire"
                     )
                 )
@@ -983,7 +1025,7 @@ def build_similarity_recommendations(**_):
             # MODE 1 : MÊME CATÉGORIE + plus saine
             score_meme_categorie_healthy = category_similarity(a_data, b_data)
             if is_healthier_by_mode(a_data, b_data, "meme_categorie"):
-                all_results.append(
+                i_results.append(
                     make_result_row(
                         a=a,
                         b=b,
@@ -999,7 +1041,7 @@ def build_similarity_recommendations(**_):
             # MODE 2 : PROFIL NUTRITIONNEL + plus saine
             score_profil_nutritionnel_healthy = nutrition_similarity(a_data, b_data)
             if is_healthier_by_mode(a_data, b_data, "profil_nutritionnel"):
-                all_results.append(
+                i_results.append(
                     make_result_row(
                         a=a,
                         b=b,
@@ -1015,7 +1057,7 @@ def build_similarity_recommendations(**_):
             # MODE 3 : SCORE NUTRITIONNEL GLOBAL + plus saine
             score_score_nutritionnel_global_healthy = global_score_similarity(a_data, b_data)
             if is_healthier_by_mode(a_data, b_data, "score_nutritionnel_global"):
-                all_results.append(
+                i_results.append(
                     make_result_row(
                         a=a,
                         b=b,
@@ -1031,7 +1073,7 @@ def build_similarity_recommendations(**_):
             # MODE 4 : NIVEAU DE TRANSFORMATION NOVA + plus saine
             score_niveau_transformation_nova_healthy = nova_similarity(a_data, b_data)
             if is_healthier_by_mode(a_data, b_data, "niveau_transformation_nova"):
-                all_results.append(
+                i_results.append(
                     make_result_row(
                         a=a,
                         b=b,
@@ -1044,126 +1086,52 @@ def build_similarity_recommendations(**_):
                     )
                 )
 
-    # ==============================
-    # 6. Création DataFrame
-    # ==============================
+        # ── Après le inner loop : top-5 + écriture immédiate ──────────────
+        if i_results:
+            batch_df = pd.DataFrame(i_results)
 
-    if all_results:
-        result_df = pd.DataFrame(all_results)
-    else:
-        result_df = pd.DataFrame(columns=[
-            "code_produit_source",
-            "code_produit_cible",
-            "score_similarite",
-            "nb_ingredients_communs",
-            "ingredients_communs",
-            "methode",
-            "mode_sante",
-            "type_recommandation",
-            "health_score_source",
-            "health_score_cible"
-        ])
-
-    # ==============================
-    # 7. Suppression doublons éventuels
-    # ==============================
-
-    if not result_df.empty:
-        result_df = result_df.drop_duplicates(
-            subset=[
-                "code_produit_source",
-                "code_produit_cible",
-                "methode",
-                "mode_sante",
-                "type_recommandation"
-            ]
-        ).reset_index(drop=True)
-
-    # ==============================
-    # 8. Top 5 par source / méthode / mode_sante / type
-    # ==============================
-
-    if not result_df.empty:
-        result_df = result_df.sort_values(
-            ["code_produit_source", "methode", "mode_sante", "type_recommandation", "score_similarite"],
-            ascending=[True, True, True, True, False]
-        )
-
-        result_df = (
-            result_df
-            .groupby(
-                ["code_produit_source", "methode", "mode_sante", "type_recommandation"],
-                as_index=False,
-                group_keys=False
+            # Top 5 par (source, methode, mode_sante, type)
+            batch_df = (
+                batch_df
+                .sort_values("score_similarite", ascending=False)
+                .drop_duplicates(subset=PK_COLS, keep="first")
+                .groupby(
+                    ["code_produit_source", "methode", "mode_sante", "type_recommandation"],
+                    as_index=False,
+                    group_keys=False,
+                )
+                .head(5)
             )
-            .head(5)
-            .reset_index(drop=True)
-        )
+
+            # Stats par mode
+            for sim_mode in SIMILARITY_MODES:
+                label_sim = similarity_method_label(sim_mode)
+                mode_stats[sim_mode]["similaire"] += len(
+                    batch_df[(batch_df["methode"] == label_sim) & (batch_df["type_recommandation"] == "similaire")]
+                )
+                mode_stats[sim_mode]["plus_saine"] += len(
+                    batch_df[(batch_df["methode"] == label_sim) & (batch_df["type_recommandation"] == "plus_saine")]
+                )
+
+            batch_df.to_sql("produit_similaire", raw_conn, if_exists="append", index=False)
+            total_inserted += len(batch_df)
+
+    # Fermer la transaction
+    raw_conn.execute(text("COMMIT"))
+    raw_conn.close()
 
     # ==============================
-    # 9. Logs de synthèse
+    # 6. Logs de synthèse
     # ==============================
 
     print("===================================================")
     print("SYNTHÈSE PAR MODE")
     print("===================================================")
-
     for sim_mode in SIMILARITY_MODES:
-        label_sim = similarity_method_label(sim_mode)
+        print(f"[{sim_mode}] Similaires retenus : {mode_stats[sim_mode]['similaire']}")
+        print(f"[{sim_mode}] Plus saines retenues : {mode_stats[sim_mode]['plus_saine']}")
 
-        sim_count_final = 0
-        healthy_count_final = 0
-
-        if not result_df.empty:
-            sim_count_final = len(result_df[
-                (result_df["methode"] == label_sim) &
-                (result_df["type_recommandation"] == "similaire")
-            ])
-
-            healthy_count_final = len(result_df[
-                (result_df["methode"] == label_sim) &
-                (result_df["type_recommandation"] == "plus_saine")
-            ])
-
-        print(f"[{sim_mode}] Similaires retenus : {sim_count_final}")
-        print(f"[{sim_mode}] Plus saines retenues : {healthy_count_final}")
-
-    print("Total final inséré :", len(result_df))
-
-    # ==============================
-    # 10. Aperçu
-    # ==============================
-
-    print("Colonnes result_df :", result_df.columns.tolist())
-    if not result_df.empty:
-        print(result_df[[
-            "code_produit_source",
-            "code_produit_cible",
-            "methode",
-            "mode_sante",
-            "type_recommandation",
-            "health_score_source",
-            "health_score_cible"
-        ]].head(20))
-
-    # ==============================
-    # 11. Insertion en base
-    # ==============================
-
-    with engine.begin() as conn:
-        ensure_similarity_table(conn)
-        conn.execute(text("DELETE FROM produit_similaire"))
-        if not result_df.empty:
-            pk_cols = ["code_produit_source", "code_produit_cible", "type_recommandation"]
-            before = len(result_df)
-            result_df = result_df.sort_values("score_similarite", ascending=False).drop_duplicates(
-                subset=pk_cols, keep="first"
-            )
-            after = len(result_df)
-            if before != after:
-                print(f"Doublons supprimés avant insertion : {before - after} lignes retirées")
-            result_df.to_sql("produit_similaire", conn, if_exists="append", index=False)
-
+    print("Total final inséré :", total_inserted)
     print("✅ Recommandations similaires et plus saines enregistrées en base")
     print("✅ Modes générés :", ", ".join([similarity_method_label(m) for m in SIMILARITY_MODES]))
 
