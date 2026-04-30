@@ -12,6 +12,7 @@ if str(APP_DIR) not in sys.path:
 
 from db_connection import get_connection
 from top_menu import render_top_menu
+from ui_hero import render_page_hero
 
 st.set_page_config(page_title="Tendances", layout="wide", initial_sidebar_state="collapsed")
 
@@ -91,11 +92,53 @@ METRIC_OPTIONS = {
     },
 }
 
-st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
+render_page_hero(
+    kicker="Analyse globale",
+    title="Tendances des donnees ",
+    subtitle="Explorez les categories les plus sucrees, salees, grasses, caloriques et le NutriScore moyen.",
+)
 
-st.title("Tendances des données – OpenFoodFacts United States")
-
-st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
+st.markdown(
+    """
+    <style>
+    .insight-card {
+        border: 1px solid rgba(15, 118, 110, 0.2);
+        border-radius: 16px;
+        padding: 1rem 1.1rem;
+        margin: 0.4rem 0 1rem;
+        background:
+            radial-gradient(260px 110px at 5% 0%, rgba(20, 184, 166, 0.08), transparent 90%),
+            radial-gradient(290px 120px at 95% 100%, rgba(245, 158, 11, 0.08), transparent 90%),
+            #ffffff;
+        box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+    }
+    .insight-title {
+        margin: 0 0 0.75rem;
+        font-size: 1.08rem;
+        font-weight: 800;
+        color: #0f172a;
+    }
+    .insight-block-title {
+        margin: 0 0 0.35rem;
+        font-size: 1.25rem;
+        font-weight: 800;
+        color: #0f172a;
+    }
+    .insight-block-subtitle {
+        margin: 0 0 0.9rem;
+        color: #475569;
+        font-size: 0.92rem;
+    }
+    .kpi-wrap {
+        border: 1px solid rgba(15, 118, 110, 0.22);
+        border-radius: 14px;
+        padding: 0.8rem 0.9rem;
+        background: rgba(255, 255, 255, 0.92);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 def to_params_json(params=None) -> str:
@@ -184,6 +227,9 @@ def format_metric_value(value, metric_config):
 # 🔎 FILTRES
 # =====================================
 
+st.markdown("<div class='insight-card'>", unsafe_allow_html=True)
+st.markdown("<p class='insight-title'>Filtres d'analyse</p>", unsafe_allow_html=True)
+
 col1, col2, col3 = st.columns(3)
 
 with col1:
@@ -206,6 +252,8 @@ with col3:
         options=list(METRIC_OPTIONS.keys()),
         index=0,
     )
+
+st.markdown("</div>", unsafe_allow_html=True)
 
 metric_config = METRIC_OPTIONS[metric_label]
 metric_sql_expression = metric_config["sql_expression"]
@@ -264,6 +312,8 @@ FROM filtered_products;
 
 df_kpis = run_query(sql_kpis, params_json)
 kpis = df_kpis.iloc[0] if not df_kpis.empty else None
+
+st.markdown("<div style='margin-top: 0.5rem;'></div>", unsafe_allow_html=True)
 
 # =====================================
 # 1️⃣ Distribution NutriScore
@@ -326,35 +376,56 @@ df_cat_metric = run_query(sql_cat_metric, params_json)
 # 📊 AFFICHAGE
 # =====================================
 
+st.markdown("<div class='insight-card'>", unsafe_allow_html=True)
+st.markdown("<p class='insight-title'>Indicateurs cles</p>", unsafe_allow_html=True)
 metric_cols = st.columns(4)
 
-metric_cols[0].metric(
-    "Produits filtres",
-    int(kpis["n_produits"]) if kpis is not None and pd.notna(kpis["n_produits"]) else 0,
-)
-metric_cols[1].metric(
-    "Produits avec NutriScore",
-    (
-        f"{float(kpis['pct_nutriscore']):.1f}%"
-        if kpis is not None and pd.notna(kpis["pct_nutriscore"])
-        else "N/A"
-    ),
-)
-metric_cols[2].metric(
-    metric_config["kpi_label"],
-    format_metric_value(kpis["avg_metric_value"], metric_config) if kpis is not None else "N/A",
-)
-metric_cols[3].metric(
-    "Categorie dominante",
-    kpis["top_categorie"] if kpis is not None and pd.notna(kpis["top_categorie"]) else "N/A",
-)
+with metric_cols[0]:
+    st.markdown("<div class='kpi-wrap'>", unsafe_allow_html=True)
+    st.metric(
+        "Produits filtres",
+        int(kpis["n_produits"]) if kpis is not None and pd.notna(kpis["n_produits"]) else 0,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
 
-st.markdown("<div style='margin-top: 0.5rem;'></div>", unsafe_allow_html=True)
+with metric_cols[1]:
+    st.markdown("<div class='kpi-wrap'>", unsafe_allow_html=True)
+    st.metric(
+        "Produits avec NutriScore",
+        (
+            f"{float(kpis['pct_nutriscore']):.1f}%"
+            if kpis is not None and pd.notna(kpis["pct_nutriscore"])
+            else "N/A"
+        ),
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+with metric_cols[2]:
+    st.markdown("<div class='kpi-wrap'>", unsafe_allow_html=True)
+    st.metric(
+        metric_config["kpi_label"],
+        format_metric_value(kpis["avg_metric_value"], metric_config) if kpis is not None else "N/A",
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+with metric_cols[3]:
+    st.markdown("<div class='kpi-wrap'>", unsafe_allow_html=True)
+    st.metric(
+        "Categorie dominante",
+        kpis["top_categorie"] if kpis is not None and pd.notna(kpis["top_categorie"]) else "N/A",
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+st.markdown("</div>", unsafe_allow_html=True)
+
+
+st.markdown("---")
 
 colA, colB = st.columns(2)
 
 with colA:
-    st.subheader("Répartition NutriScore")
+    st.markdown("<div class='insight-card'>", unsafe_allow_html=True)
+    st.markdown("<p class='insight-title'>Repartition NutriScore</p>", unsafe_allow_html=True)
     if df_nutri.empty:
         st.info("Aucune donnee disponible pour les filtres selectionnes.")
     else:
@@ -369,10 +440,12 @@ with colA:
             )
         )
         with st.expander("Voir les donnees NutriScore"):
-            st.dataframe(df_nutri, use_container_width=True)
+            st.dataframe(df_nutri, use_container_width=True, hide_index=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 with colB:
-    st.subheader("Top 10 catégories (volume)")
+    st.markdown("<div class='insight-card'>", unsafe_allow_html=True)
+    st.markdown("<p class='insight-title'>Top 10 categories (volume)</p>", unsafe_allow_html=True)
     if df_cat_count.empty:
         st.info("Aucune categorie ne correspond aux filtres selectionnes.")
     else:
@@ -386,9 +459,15 @@ with colB:
             )
         )
         with st.expander("Voir les donnees des categories"):
-            st.dataframe(df_cat_count, use_container_width=True)
+            st.dataframe(df_cat_count, use_container_width=True, hide_index=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-st.subheader(metric_config["section_title"])
+st.markdown("<div class='insight-card'>", unsafe_allow_html=True)
+st.markdown(f"<p class='insight-block-title'>{metric_config['section_title']}</p>", unsafe_allow_html=True)
+st.markdown(
+    "<p class='insight-block-subtitle'>Classement des categories selon la dimension nutritionnelle selectionnee.</p>",
+    unsafe_allow_html=True,
+)
 if df_cat_metric.empty:
     st.info(metric_config["empty_message"])
 else:
@@ -414,4 +493,6 @@ else:
         st.dataframe(
             display_df,
             use_container_width=True,
+            hide_index=True,
         )
+st.markdown("</div>", unsafe_allow_html=True)

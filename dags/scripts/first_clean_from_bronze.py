@@ -14,17 +14,20 @@ if SCRIPTS_DIR not in sys.path:
 
 from transform_to_silver import (
     OUTPUT_COLUMNS,
-    apply_manual_correction,
+    apply_validated_product_correction,
+    apply_validated_category_suggestion,
     build_row,
     evaluate_final_contract,
     get_s3_client,
     infer_import_type,
     iter_json_lines,
-    load_active_manual_corrections,
+    load_validated_category_suggestions,
     load_normalization_rules,
+    load_validated_manual_product_submissions,
+    load_validated_product_corrections,
     normalize_code,
     resolve_rejected_product_reviews,
-    update_manual_correction_status,
+    update_category_suggestion_status,
     upsert_rejected_product_reviews,
     write_empty_parquet,
     write_rows_chunk,
@@ -69,9 +72,13 @@ def init_first_clean_stats() -> dict[str, int]:
         "nutriscore_inconsistent": 0,
         "energy_inconsistent": 0,
         "salt_sodium_inconsistent": 0,
-        "manual_corrections_loaded": 0,
-        "manual_corrections_applied": 0,
-        "manual_primary_category_overrides": 0,
+        "category_suggestions_loaded": 0,
+        "category_suggestions_applied": 0,
+        "manual_product_corrections_loaded": 0,
+        "manual_product_corrections_applied": 0,
+        "manual_product_submissions_loaded": 0,
+        "manual_product_submissions_recovered": 0,
+        "suggested_primary_category_overrides": 0,
     }
 
 
@@ -91,13 +98,17 @@ def first_clean_from_bronze(
     keys = derive_cleaning_keys(output_key)
     s3 = get_s3_client()
     rules, rules_source = load_normalization_rules()
-    manual_corrections = load_active_manual_corrections()
+    category_suggestions = load_validated_category_suggestions()
+    product_corrections = load_validated_product_corrections()
+    manual_submissions = load_validated_manual_product_submissions()
     obj = s3.get_object(Bucket=input_bucket, Key=input_key)
     source_run_id = os.getenv("AIRFLOW_CTX_DAG_RUN_ID")
     import_type = infer_import_type()
 
     stats = init_first_clean_stats()
-    stats["manual_corrections_loaded"] = len(manual_corrections)
+    stats["category_suggestions_loaded"] = len(category_suggestions)
+    stats["manual_product_corrections_loaded"] = len(product_corrections)
+    stats["manual_product_submissions_loaded"] = len(manual_submissions)
     transform_stats = {
         "energy_imputed": 0,
         "energy_corrected": 0,
@@ -113,8 +124,10 @@ def first_clean_from_bronze(
         "primary_category_from_tags": 0,
         "primary_category_from_categories": 0,
         "primary_category_default": 0,
-        "manual_corrections_applied": 0,
-        "manual_primary_category_overrides": 0,
+        "category_suggestions_applied": 0,
+        "manual_product_corrections_applied": 0,
+        "manual_product_submissions_recovered": 0,
+        "suggested_primary_category_overrides": 0,
         "rule_replacements": 0,
         "rule_filtered": 0,
     }
@@ -130,7 +143,8 @@ def first_clean_from_bronze(
 
     rows_batch: list[dict[str, object]] = []
     rejected_reviews: list[dict[str, object]] = []
-    resolved_corrected_codes: set[str] = set()
+    resolved_suggested_codes: set[str] = set()
+    processed_codes: set[str] = set()
     writer = None
 
     try:
@@ -153,10 +167,17 @@ def first_clean_from_bronze(
 
                 stats["rows_input"] += 1
                 code = normalize_code(product.get("code"))
-                correction = manual_corrections.get(code) if code is not None else None
-                corrected_product, correction_applied = apply_manual_correction(
+                if code is not None:
+                    processed_codes.add(code)
+                product_after_manual_correction, manual_correction_applied = apply_validated_product_correction(
                     product,
-                    correction,
+                    product_corrections.get(code) if code is not None else None,
+                    stats=transform_stats,
+                )
+                suggestion = category_suggestions.get(code) if code is not None else None
+                corrected_product, suggestion_applied = apply_validated_category_suggestion(
+                    product_after_manual_correction,
+                    suggestion,
                     stats=transform_stats,
                 )
                 row = build_row(
@@ -164,7 +185,7 @@ def first_clean_from_bronze(
                     stats=transform_stats,
                     rules=rules,
                     recovery_mode=False,
-                    manual_correction=correction,
+                    category_suggestion=suggestion,
                 )
                 issues = evaluate_final_contract(row)
 
@@ -180,7 +201,7 @@ def first_clean_from_bronze(
                             "brands": row.get("brands") or product.get("brands"),
                             "raw_payload": bad_product,
                             "quality_issues": issues,
-                            "review_status": "in_review" if correction_applied else "pending",
+                            "review_status": "needs_review" if suggestion_applied else "pending",
                         }
                     )
                     for issue in issues:
@@ -189,11 +210,53 @@ def first_clean_from_bronze(
 
                 rows_batch.append({column: row.get(column) for column in OUTPUT_COLUMNS})
                 stats["rows_good"] += 1
-                if correction_applied and row.get("code"):
-                    resolved_corrected_codes.add(str(row["code"]))
+                if suggestion_applied and row.get("code"):
+                    resolved_suggested_codes.add(str(row["code"]))
+                if manual_correction_applied and row.get("code"):
+                    resolved_suggested_codes.add(str(row["code"]))
                 if len(rows_batch) >= chunk_size:
                     writer = write_rows_chunk(writer, rows_batch, good_path)
                     rows_batch = []
+
+        if rows_batch:
+            writer = write_rows_chunk(writer, rows_batch, good_path)
+            rows_batch = []
+
+        with open(bad_path, "a", encoding="utf-8") as bad_handle:
+            for code, manual_product in manual_submissions.items():
+                if code in processed_codes:
+                    continue
+
+                row = build_row(
+                    manual_product,
+                    stats=transform_stats,
+                    rules=rules,
+                    recovery_mode=True,
+                    category_suggestion=None,
+                )
+                issues = evaluate_final_contract(row, recovery_mode=True)
+                if issues:
+                    rejected_product = dict(manual_product)
+                    rejected_product["_quality_contract_issues"] = issues
+                    bad_handle.write(json.dumps(rejected_product, ensure_ascii=False) + "\n")
+                    stats["rows_bad"] += 1
+                    rejected_reviews.append(
+                        {
+                            "code_produit": row.get("code") or code,
+                            "product_name": row.get("product_name") or manual_product.get("product_name"),
+                            "brands": row.get("brands") or manual_product.get("brands"),
+                            "raw_payload": rejected_product,
+                            "quality_issues": issues,
+                            "review_status": "needs_review",
+                        }
+                    )
+                    continue
+
+                rows_batch.append({column: row.get(column) for column in OUTPUT_COLUMNS})
+                stats["rows_good"] += 1
+                transform_stats["manual_product_submissions_recovered"] += 1
+                if row.get("code"):
+                    resolved_suggested_codes.add(str(row["code"]))
 
         if rows_batch:
             writer = write_rows_chunk(writer, rows_batch, good_path)
@@ -213,9 +276,10 @@ def first_clean_from_bronze(
             source_task="first_clean_from_bronze",
             source_run_id=source_run_id,
             import_type=import_type,
+            rules=rules,
         )
-        resolve_rejected_product_reviews(resolved_corrected_codes)
-        update_manual_correction_status(resolved_corrected_codes, "applied")
+        resolve_rejected_product_reviews(resolved_suggested_codes)
+        update_category_suggestion_status(resolved_suggested_codes, "applied")
         stats["rules_loaded"] = 0 if rules_source == "defaults" else 1
         stats.update(transform_stats)
 

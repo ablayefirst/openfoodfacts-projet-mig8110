@@ -28,11 +28,11 @@ Sur la page Comparateur :
 
 ## 3. Règles de sélection
 
-- L’utilisateur peut sélectionner **au minimum 2 produits** et **au maximum 3 produits**.
-- Si l’utilisateur tente de sélectionner un 4ᵉ produit :
+- L’utilisateur peut sélectionner **au minimum 2 produits** et **au maximum 4 produits**.
+- Si l’utilisateur tente de sélectionner un 5ᵉ produit :
   - un message d’information s’affiche :
-    - « Vous ne pouvez comparer que 3 produits à la fois. Décochez un produit avant d'en ajouter un autre. »
-  - le 4ᵉ produit **n’est pas ajouté** à la liste de comparaison.
+    - « Vous ne pouvez comparer que 4 produits à la fois. Décochez un produit avant d'en ajouter un autre. »
+  - le 5ᵉ produit **n’est pas ajouté** à la liste de comparaison.
 - Le bouton « Comparer les produits sélectionnés » :
   - affiche un avertissement si **moins de 2 produits** sont sélectionnés,
   - redirige vers la page de comparaison si la sélection est valide.
@@ -52,20 +52,23 @@ Pour chaque produit sélectionné, la page `03_comparateur_produits.py` affiche 
 
 - **Scores de santé** :
   - NutriScore (A à E),
-  - NOVA (niveau de transformation des aliments).
+  - NOVA (niveau de transformation des aliments),
+  - score santé explicable sur 100.
 
 - **Valeurs nutritionnelles clés** :
   - sucre (g/100g),
   - sel (g/100g),
   - graisses saturées (g/100g),
   - fibres (g/100g),
-  - protéines (g/100g).
+- protéines (g/100g).
 
 L’affichage côte à côte permet de repérer facilement quel produit est :
 - le plus sucré,
 - le plus salé,
 - le plus transformé (NOVA),
 - ou au contraire le plus équilibré.
+
+La page ajoute aussi un tableau de synthèse et un graphique à barres pour comparer rapidement les scores santé.
 
 ---
 
@@ -92,17 +95,15 @@ En bas de la page comparateur, une section **« Meilleur choix parmi ces produit
 
 La logique est la suivante :
 
-1. Si un **score personnalisé** est disponible (profil actif) :
-   - on choisit le produit avec le **score le plus élevé** ;
-2. Sinon :
-   - on peut se baser sur le NutriScore, en convertissant A–E en score numérique (A = 5, …, E = 1),
-   - le produit avec le meilleur score NutriScore est mis en avant.
+1. En mode **NutriScore & NOVA**, on privilégie le NutriScore, avec NOVA comme départage.
+2. En mode **Profil nutritionnel**, on utilise le score santé explicable.
 
 La section affiche :
 
 - le **nom du produit recommandé**,
-- un rappel des raisons (ex. « meilleur NutriScore » ou « score personnalisé le plus élevé pour votre profil »),
-- éventuellement une brève explication sur ce qui le différencie des autres (souvent moins sucré ou moins salé).
+- le score santé sur 100,
+- un rappel des raisons,
+- le détail chiffré des bonus et pénalités : sucre, sel, graisses saturées, fibres, protéines, NOVA et NutriScore.
 
 ---
 
