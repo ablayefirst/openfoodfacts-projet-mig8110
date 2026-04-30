@@ -2,9 +2,9 @@
 """Generate canonical ingredient synonyms with an optional LLM pass.
 
 This script intentionally runs before similarity generation. It enriches the
-existing `ingredient` / `synonyme_ingredient` tables without changing product
-links directly. Downstream similarity can resolve raw ingredient names through
-`synonyme_ingredient`.
+existing ingredient lookup tables without changing product links directly.
+Downstream similarity can resolve raw ingredient names through
+`ingredient_lookup`.
 """
 
 from __future__ import annotations
@@ -459,6 +459,11 @@ def normalize_llm_rows(batch: list[tuple[int, str]], rows: list[dict[str, Any]])
                 "source_id": ingredient_id,
                 "raw_name": raw_norm,
                 "canonical": canonical,
+                "canonical_relation": normalize_relation_type(
+                    row.get("canonical_relation"),
+                    raw_norm,
+                    canonical,
+                ),
                 "synonyms": synonyms[:6],
                 "language": language,
                 "confidence": confidence,
@@ -533,6 +538,55 @@ def upsert_synonym(
     )
 
 
+def upsert_standardise_synonym(
+    cur,
+    synonym: str,
+    standardise_id: int,
+    language: str | None,
+    confidence: float,
+    relation_type: str,
+) -> None:
+    cur.execute(
+        """
+        SELECT id_synonyme
+        FROM synonyme_ingredient
+        WHERE LOWER(TRIM(nom_synonyme)) = LOWER(TRIM(%s))
+        LIMIT 1
+        """,
+        (synonym,),
+    )
+    existing = cur.fetchone()
+    if existing:
+        cur.execute(
+            """
+            UPDATE synonyme_ingredient
+            SET id_standardise = %s,
+                langue = COALESCE(%s, langue),
+                source = 'llm',
+                relation_type = %s,
+                confidence = GREATEST(COALESCE(confidence, 0), %s)
+            WHERE id_synonyme = %s
+            """,
+            (standardise_id, language, relation_type, confidence, existing[0]),
+        )
+        return
+
+    cur.execute(
+        """
+        INSERT INTO synonyme_ingredient (
+            nom_synonyme,
+            id_standardise,
+            langue,
+            source,
+            relation_type,
+            confidence
+        )
+        VALUES (%s, %s, %s, 'llm', %s, %s)
+        """,
+        (synonym, standardise_id, language, relation_type, confidence),
+    )
+
+
 def persist_rows(conn, rows: list[dict[str, Any]]) -> tuple[int, int]:
     canonical_count = 0
     synonym_count = 0
@@ -560,6 +614,55 @@ def persist_rows(conn, rows: list[dict[str, Any]]) -> tuple[int, int]:
     return canonical_count, synonym_count
 
 
+def persist_standardise_rows(conn, rows: list[dict[str, Any]]) -> tuple[int, int]:
+    standardise_count = 0
+    synonym_count = 0
+    with conn.cursor() as cur:
+        for row in rows:
+            standardise_id = int(row["source_id"])
+            standardise_count += 1
+
+            candidates = [
+                {
+                    "value": row["raw_name"],
+                    "relation_type": normalize_relation_type(
+                        row.get("canonical_relation"),
+                        row["raw_name"],
+                        row["canonical"],
+                    ),
+                }
+            ]
+            if row["canonical"] != row["raw_name"]:
+                candidates.append({"value": row["canonical"], "relation_type": "exact"})
+            candidates.extend(row["synonyms"])
+
+            seen = set()
+            for synonym in candidates:
+                synonym_value = clean_synonym(synonym.get("value"))
+                if not synonym_value:
+                    continue
+                synonym_key = normalize_text(synonym_value)
+                if synonym_key in seen:
+                    continue
+                seen.add(synonym_key)
+                relation_type = normalize_relation_type(
+                    synonym.get("relation_type"),
+                    synonym_value,
+                    row["canonical"],
+                )
+                upsert_standardise_synonym(
+                    cur,
+                    synonym_value,
+                    standardise_id,
+                    row["language"],
+                    row["confidence"],
+                    relation_type,
+                )
+                synonym_count += 1
+    conn.commit()
+    return standardise_count, synonym_count
+
+
 def generate_ingredient_synonyms(
     *,
     limit: int = 100,
@@ -572,11 +675,19 @@ def generate_ingredient_synonyms(
     max_llm_calls: int | None = None,
     max_candidate_words: int = 6,
     max_candidate_length: int = 80,
+    candidate_fetcher=None,
+    candidate_kind: str = "ingredient",
 ) -> dict[str, int]:
+    if candidate_kind not in {"ingredient", "standardise"}:
+        raise ValueError("candidate_kind must be 'ingredient' or 'standardise'")
+
     conn = get_pg_connection()
     try:
         raw_limit = max(limit, limit * DEFAULT_FETCH_MULTIPLIER)
-        raw_candidates = fetch_candidates(conn, raw_limit, include_existing)
+        if candidate_fetcher is not None:
+            raw_candidates = candidate_fetcher(raw_limit, include_existing)
+        else:
+            raw_candidates = fetch_candidates(conn, raw_limit, include_existing)
         candidates, rejected_candidates = filter_candidates(
             raw_candidates,
             limit=limit,
@@ -620,8 +731,12 @@ def generate_ingredient_synonyms(
                 save_cache(cache_path, cache)
 
             rows = [
-                cache[normalize_text(name)]
-                for _, name in batch
+                {
+                    **cache[normalize_text(name)],
+                    "source_id": source_id,
+                    "raw_name": normalize_text(name),
+                }
+                for source_id, name in batch
                 if normalize_text(name) in cache
             ]
 
@@ -629,7 +744,10 @@ def generate_ingredient_synonyms(
                 print(json.dumps(rows, ensure_ascii=False, indent=2))
                 continue
 
-            canon_count, syn_count = persist_rows(conn, rows)
+            if candidate_kind == "standardise":
+                canon_count, syn_count = persist_standardise_rows(conn, rows)
+            else:
+                canon_count, syn_count = persist_rows(conn, rows)
             canonical_written += canon_count
             synonyms_written += syn_count
             print(f"Batch écrit: {canon_count} canoniques, {syn_count} synonymes")

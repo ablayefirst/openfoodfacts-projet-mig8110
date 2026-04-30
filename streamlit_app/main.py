@@ -266,6 +266,11 @@ category_detail_filter = st.text_input(
     "Recherche libre dans catégories détaillées (optionnel)"
 )
 
+search_ingredient = st.text_input(
+    "Rechercher par ingrédient (synonymes inclus)",
+    placeholder="ex: egg, sucre, farine…",
+)
+
 # ==============================
 #  RESET PAGINATION SI FILTRES CHANGENT
 # ==============================
@@ -278,6 +283,7 @@ current_filters_signature = (
     sort_option,
     sort_order,
     category_detail_filter,
+    search_ingredient,
 )
 
 if "last_filters_signature" not in st.session_state:
@@ -352,6 +358,24 @@ if category_detail_filter:
     )
     """
     query_params["category_detail_filter"] = f"%{category_detail_filter}%"
+
+if search_ingredient:
+    # Passe par ingredient_lookup pour chercher via les synonymes et formes canoniques.
+    # Exemple : "egg" trouve aussi les produits contenant "oeuf" si le synonyme existe.
+    query += """
+    AND EXISTS (
+        SELECT 1
+        FROM produit_ingredient pi2
+        JOIN ingredient i2 ON i2.id_ingredient = pi2.id_ingredient
+        JOIN ingredient_lookup il_raw
+          ON il_raw.nom_recherche_normalise = LOWER(TRIM(i2.ingredients_nom))
+        JOIN ingredient_lookup il_search
+          ON il_search.nom_canonique = il_raw.nom_canonique
+        WHERE pi2.code_produit = p.code_produit
+          AND il_search.nom_recherche_normalise LIKE %(search_ingredient)s
+    )
+    """
+    query_params["search_ingredient"] = f"%{search_ingredient.strip().lower()}%"
 
 # Filtre sucre côté base :
 # - On accepte les produits sans infos nutritionnelles (v.sugars_100g IS NULL)
@@ -459,6 +483,7 @@ is_home = (
     and (not search_code)
     and (selected_main_category == "Toutes")
     and (not category_detail_filter)
+    and (not search_ingredient)
     and max_sugar == 50.0
 )
 
