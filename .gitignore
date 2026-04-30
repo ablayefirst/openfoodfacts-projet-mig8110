@@ -9,7 +9,7 @@ data/gold/*.parquet
 
 # datasets volumineux
 *.csv
-*.jsonl
+
 *.parquet
 *.gz
 
@@ -70,6 +70,6 @@ airflow.db
 docker-compose.override.yml
 
 # volumes docker
-data/
+
 postgres_data/
 minio_data/
