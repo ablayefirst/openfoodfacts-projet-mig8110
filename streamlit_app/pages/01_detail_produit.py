@@ -42,6 +42,7 @@ SIMILARITY_MODE_OPTIONS = {
     "2 - Profil nutritionnel": "profil_nutritionnel",
     "3 - Score nutritionnel global": "score_nutritionnel_global",
     "4 - Niveau de transformation (NOVA)": "niveau_transformation_nova",
+    "5 - Similarité ingrédients": "similitude_ingredients",
 }
 
 HEALTHIER_MODE_OPTIONS = {
@@ -248,7 +249,7 @@ with st.expander("Changer de produit", expanded=False):
 # REQUÊTES SQL
 # ==============================
 
-DETAIL_QUERY = """
+DETAIL_QUERY = r"""
 SELECT
     p.code_produit AS code,
     p.nom_produit AS product_name,
@@ -263,7 +264,15 @@ SELECT
     p.image_nutrition_url,
     m.brands AS brand,
     COALESCE(string_agg(DISTINCT c.categorie, ', '), 'Non spécifiée') AS categories,
-    COALESCE(string_agg(DISTINCT ing.ingredients_nom, ', '), 'Non spécifiés') AS ingredients,
+    COALESCE(
+        string_agg(DISTINCT ing.ingredients_nom, ', ' ORDER BY ing.ingredients_nom)
+        FILTER (
+            WHERE ing.ingredients_nom IS NOT NULL
+              AND TRIM(ing.ingredients_nom) <> ''
+              AND TRIM(ing.ingredients_nom) !~* '^(and|or)\s+|\s+(and|or)$'
+        ),
+        'Non spécifiés'
+    ) AS ingredients,
     COALESCE(string_agg(DISTINCT a.allergens, ', '), 'Non spécifiés') AS allergens,
     COALESCE(string_agg(DISTINCT lb.labels, ', '), 'Non spécifiés') AS labels,
     COALESCE(string_agg(DISTINCT pays.countries_en, ', '), 'Non spécifiés') AS countries,
@@ -625,6 +634,7 @@ st.markdown(
         font-weight: 800;
         border: 1px solid transparent;
     }
+    .badge-ingredient { background: #f8fafc; color: #334155; border-color: #cbd5e1; }
     .badge-allergen { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
     .badge-label { background: #dcfce7; color: #166534; border-color: #bbf7d0; }
     .replace-card {
@@ -731,6 +741,7 @@ quantite = row.get("quantite", "Non spécifiée")
 category_main = row.get("categorie_principale", "autres")
 categories = row.get("categories", "Non spécifiée")
 countries = row.get("countries", "Non spécifiés")
+ingredient_values = split_display_values(row.get("ingredients"), limit=40)
 allergen_values = split_display_values(row.get("allergens"), limit=8)
 label_values = split_display_values(row.get("labels"), limit=8)
 nutrition_grade_display = str(row.get("nutrition_grade", "N/A") or "N/A").upper()
@@ -1485,8 +1496,8 @@ with details_tab:
     ]
     st.dataframe(nutrition_rows, use_container_width=True, hide_index=True)
 
-    st.markdown("### Ingredients")
-    st.write(row.get("ingredients", "Non spécifiés"))
+    st.markdown("### Ingrédients déclarés")
+    st.markdown(render_detail_badges(ingredient_values, "badge-ingredient"), unsafe_allow_html=True)
 
     detail_col1, detail_col2 = st.columns(2)
     with detail_col1:
