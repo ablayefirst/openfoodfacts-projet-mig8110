@@ -161,12 +161,14 @@ with DAG(
     )
 
     (
-        extract_task
-        >> upload_task
-        >> first_clean_task
-        >> second_clean_task
-        >> merge_task
-        >> load_task
-        >> standardize_task
-        >> build_similarity_task
+       (
+       extract_task
+       >> upload_task
+       >> first_clean_task
+       >> second_clean_task
+       >> merge_task
+       >> load_task
+       >> standardize_task
+       >> build_similarity_task
+)
     )
