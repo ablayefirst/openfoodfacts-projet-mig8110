@@ -394,7 +394,7 @@ def normalize_lookup_text(value: str | None) -> str | None:
 
 
 def resolve_ingredient_id(cur, ingredient_name: str, cache_ingredient: dict[str, int]) -> int:
-    """Return a canonical ingredient id when a synonym mapping exists."""
+    """Return an ingredient id, resolving standardised synonyms when possible."""
 
     lookup_name = normalize_lookup_text(ingredient_name)
     if lookup_name is None:
@@ -405,18 +405,38 @@ def resolve_ingredient_id(cur, ingredient_name: str, cache_ingredient: dict[str,
 
     cur.execute(
         """
-        SELECT s.id_ingredient
+        SELECT
+            s.id_ingredient,
+            s.id_standardise,
+            ist.nom_standardise
         FROM synonyme_ingredient s
+        LEFT JOIN ingredient_standardise ist
+          ON ist.id_standardise = s.id_standardise
         WHERE LOWER(TRIM(s.nom_synonyme)) = LOWER(TRIM(%s))
           AND COALESCE(s.relation_type, 'exact') IN ('exact', 'traduction', 'correction')
+        ORDER BY CASE WHEN s.id_ingredient IS NOT NULL THEN 0 ELSE 1 END
         LIMIT 1
         """,
         (lookup_name,),
     )
     row = cur.fetchone()
     if row:
-        cache_ingredient[lookup_name] = row[0]
-        return row[0]
+        ingredient_id, _standardise_id, standardise_name = row
+        if ingredient_id is not None:
+            cache_ingredient[lookup_name] = ingredient_id
+            return ingredient_id
+
+        canonical_name = normalize_lookup_text(standardise_name)
+        if canonical_name is not None:
+            ingredient_id = get_or_create(
+                cur,
+                "ingredient",
+                "id_ingredient",
+                "ingredients_nom",
+                canonical_name,
+            )
+            cache_ingredient[lookup_name] = ingredient_id
+            return ingredient_id
 
     ingredient_id = get_or_create(
         cur,
@@ -517,6 +537,9 @@ def upsert_nutrition(cur, row: pd.Series):
 
 
 def insert_link(cur, table: str, id_col: str, code_produit: str, entity_id):
+    if entity_id is None:
+        return False
+
     cur.execute(
         f"INSERT INTO {table} (code_produit, {id_col}) VALUES (%s, %s) ON CONFLICT DO NOTHING",
         (code_produit, entity_id),
