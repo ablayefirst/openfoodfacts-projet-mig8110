@@ -42,7 +42,7 @@ SIMILARITY_MODE_OPTIONS = {
     "2 - Profil nutritionnel": "profil_nutritionnel",
     "3 - Score nutritionnel global": "score_nutritionnel_global",
     "4 - Niveau de transformation (NOVA)": "niveau_transformation_nova",
-    "5 - Similarité ingrédients": "similitude_ingredients",
+   
 }
 
 HEALTHIER_MODE_OPTIONS = {
