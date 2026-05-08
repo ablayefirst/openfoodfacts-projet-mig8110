@@ -417,6 +417,64 @@ if detail_df.empty:
 
 row = detail_df.iloc[0]
 
+
+
+# ✅ état affichage
+if "show_nutri" not in st.session_state:
+    st.session_state.show_nutri = False
+
+# 🔘 bouton toggle
+if st.button("📊 Analyser le profil nutritionnel"):
+    st.session_state.show_nutri = not st.session_state.show_nutri
+
+# 👇 affichage conditionnel
+if st.session_state.show_nutri:
+
+    sugar = row.get("sugars_100g") or 0
+    salt = row.get("salt_100g") or 0
+    fat_sat = row.get("saturated_fat_100g") or 0
+    fiber = row.get("fiber_100g") or 0
+    proteins = row.get("proteins_100g") or 0
+
+    values = {
+        "Sucre": float(sugar),
+        "Sel": float(salt),
+        "Graisses saturées": float(fat_sat),
+        "Fibres": float(fiber),
+        "Protéines": float(proteins)
+    }
+
+    st.markdown("### 📊 Profil nutritionnel")
+    import matplotlib.pyplot as plt
+
+    colors = ["#ef4444", "#f97316", "#eab308", "#22c55e", "#3b82f6"]
+  
+    fig, ax = plt.subplots(figsize=(4, 2))
+
+    labels = ["Sucre", "Sel", "Graisses saturées", "Fibres", "Protéines"]
+
+    ax.bar(labels, values.values(), color=colors)
+
+    # 🔽 corrige le chevauchement
+    ax.set_xticklabels(labels, rotation=30, ha='right')
+
+    # 🔽 taille texte
+    ax.tick_params(axis='x', labelsize=8)
+    ax.tick_params(axis='y', labelsize=8)
+
+    ax.set_ylabel("g / 100g", fontsize=9)
+
+    # 🔽 style clean
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    # 🔥 IMPORTANT
+    plt.tight_layout()
+
+    st.pyplot(fig, use_container_width=False)
+    
+
+
 similar_df = read_optional_recommendations(SIMILAR_PRODUCTS_QUERY, code, selected_similarity_method)
 healthier_df = read_optional_recommendations(HEALTHIER_PRODUCTS_QUERY, code, selected_healthier_method)
 
@@ -1514,3 +1572,7 @@ try:
     conn.close()
 except Exception:
     pass
+
+
+
+
