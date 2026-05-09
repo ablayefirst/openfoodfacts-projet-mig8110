@@ -330,7 +330,7 @@ OPENFOOD_MAX_ROWS=500
 |---------|-----|--------------|
 | Streamlit | http://localhost:8501 | - |
 | Airflow | http://localhost:8080 | `admin` / `admin123` |
-| Adminer | http://localhost:8081 | serveur `postgres`, utilisateur PostgreSQL |
+| Adminer | http://localhost:8081 | serveur `postgres`, user `postgres`, password `postgres123` |
 | MinIO API | http://localhost:9000 | - |
 | MinIO Console | http://localhost:9001 | `minioadmin` / `minioadmin123` |
 | JupyterLab | http://localhost:8888 | token `openfood2024` |
