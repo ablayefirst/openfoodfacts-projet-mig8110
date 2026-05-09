@@ -1,81 +1,86 @@
 # OpenFoodFacts Data Platform (MIG8110)
 
-## Plateforme data OpenFoodFacts Canada avec pipeline ETL, entreposage objet et exploration Streamlit
+## Plateforme data OpenFoodFacts avec pipeline ETL, stockage objet, PostgreSQL, IA et Streamlit
 
-Ce projet met en place une chaîne de traitement de données autour des exports OpenFoodFacts Canada:
+Ce projet met en place une chaîne complète de traitement de données autour des exports OpenFoodFacts. Il transforme des données alimentaires brutes, hétérogènes et parfois incomplètes en une plateforme exploitable pour l'analyse, la comparaison et la recommandation de produits.
 
-- extraction des exports officiels OpenFoodFacts
-- prise en charge optionnelle d'une source locale JSONL pour le bootstrap
-- dépôt des données brutes dans MinIO
-- nettoyage en deux étapes et normalisation en couche Silver
-- chargement dans PostgreSQL
-- exploration et administration via une application Streamlit
+La plateforme couvre :
 
-L'architecture est orchestrée avec Docker Compose et Airflow. La couche Silver est maintenue au format `Parquet`.
+- extraction des exports officiels OpenFoodFacts ou chargement d'un fichier local JSONL
+- dépôt des données brutes dans MinIO, zone Bronze
+- nettoyage en deux passes et normalisation en zone Silver au format Parquet
+- chargement dans PostgreSQL selon un schéma relationnel normalisé
+- standardisation des ingrédients par clustering TF-IDF, avec enrichissement LLM optionnel
+- construction de recommandations produit via un moteur de similarité
+- exploration, comparaison et administration via une application Streamlit multi-pages
+
+L'architecture est orchestrée avec Docker Compose et Airflow.
 
 ## 1. Objectifs
 
-- Extraire les produits OpenFoodFacts Canada depuis les exports officiels ou une source locale
+- Extraire les produits OpenFoodFacts depuis les exports officiels ou une source locale
 - Contrôler la qualité minimale des données avant ingestion
-- Normaliser certains champs métier, notamment les catégories, le NutriScore et les quantités
-- Charger un schéma PostgreSQL normalisé
-- Améliorer les performances de consultation avec des index SQL
-- Offrir une interface Streamlit pour la recherche, l'analyse et la comparaison de produits
+- Normaliser les champs métier : catégories, NutriScore, quantités, nutriments et ingrédients
+- Charger un schéma PostgreSQL normalisé et indexé
+- Standardiser les ingrédients à partir des variantes présentes dans les données
+- Générer des recommandations de produits similaires ou plus sains
+- Offrir une interface Streamlit pour la recherche, l'analyse, la comparaison et l'administration
 
 ## 2. Architecture Technique
 
 Tous les composants sont définis dans `docker-compose.yml`.
 
-Services principaux:
+Services principaux :
 
 - `postgres` : base métier PostgreSQL
 - `airflow-postgres` : base de métadonnées Airflow
 - `minio` et `minio-init` : stockage objet S3-compatible et initialisation des buckets
 - `airflow-webserver`, `airflow-scheduler`, `airflow-init` : orchestration ETL
 - `streamlit-app` : interface utilisateur principale
-- `adminer` : exploration de la base
+- `adminer` : exploration de la base PostgreSQL
 - `jupyter` : exploration et prototypage
+- `build-similarity` : service éphémère pour recalculer les similarités si nécessaire
 
-Vue simplifiée:
+Vue simplifiée :
 
 ```text
 Source de données
       |
       +--> Exports officiels OpenFoodFacts
+      |     +--> Full dump
+      |     +--> Delta exports
       |
-      |     +--> Full dump (full)
-      |     +--> Delta exports (delta)
-      |
-      +--> Fichier local JSONL (mode local)
+      +--> Fichier local JSONL
       |
       v
-Airflow DAG
+Airflow DAG : openfood_pipeline_united_states
 extract -> upload -> first_clean -> second_clean -> merge -> load
+        -> standardize_ingredients -> build_similarity_recommendations
       |
-      +--> MinIO bronze (JSONL brut)
+      +--> MinIO bronze : JSONL brut
       |
-      +--> MinIO silver
-            +--> first/..._file1_good.parquet
-            +--> first/..._file2_bad.jsonl
-            +--> second/..._recovered.parquet
-            +--> second/..._reject.jsonl
-            +--> final parquet fusionné
-      |
-      v
-PostgreSQL (schéma normalisé + index)
+      +--> MinIO silver : Parquet nettoyé
+      |     +--> first/..._file1_good.parquet
+      |     +--> first/..._file2_bad.jsonl
+      |     +--> second/..._recovered.parquet
+      |     +--> second/..._reject.jsonl
+      |     +--> final parquet fusionné
       |
       v
-Streamlit (dashboard, insights, admin)
+PostgreSQL : schéma normalisé, index, historique, similarités
+      |
+      v
+Streamlit : recherche, détails, insights, comparateur, favoris, admin
 ```
 
 ## 3. Architecture Data
 
 ### Bronze
 
-- Données brutes issues d'un full, d'un delta ou d'un fichier local
-- Format: `JSONL`
-- Bucket MinIO: `bronze`
-- Scripts principaux:
+- Données brutes issues d'un full dump, d'un delta export ou d'un fichier local
+- Format : `JSONL`
+- Bucket MinIO : `bronze`
+- Scripts principaux :
   - `dags/scripts/extract_off_exports.py`
   - `dags/scripts/upload_bronze_to_minio.py`
 
@@ -83,42 +88,36 @@ Streamlit (dashboard, insights, admin)
 
 - Nettoyage, récupération, harmonisation et enrichissement des champs
 - Normalisation pilotée par `config/normalization_rules.yml`
-- Format conservé: `Parquet`
-- Bucket MinIO: `silver`
-- Scripts principaux:
+- Format : `Parquet`
+- Bucket MinIO : `silver`
+- Scripts principaux :
   - `dags/scripts/transform_to_silver.py`
   - `dags/scripts/first_clean_from_bronze.py`
   - `dags/scripts/second_clean_from_bad.py`
   - `dags/scripts/merge_final_clean.py`
 
-Le pipeline Silver produit maintenant quatre sorties intermédiaires:
+Le pipeline Silver produit quatre sorties intermédiaires :
 
-- `file1_good.parquet`: lignes conformes dès le premier nettoyage
-- `file2_bad.jsonl`: lignes échouant au premier contrat qualité mais encore récupérables
-- `recovered.parquet`: lignes sauvées au second nettoyage
-- `reject.jsonl`: lignes toujours invalides après la seconde tentative
+- `file1_good.parquet` : lignes conformes dès le premier nettoyage
+- `file2_bad.jsonl` : lignes échouant au premier contrat qualité mais encore récupérables
+- `recovered.parquet` : lignes sauvées au second nettoyage
+- `reject.jsonl` : lignes définitivement invalides après la seconde tentative
 
-Le fichier Silver final chargé dans PostgreSQL est la fusion dédupliquée de:
+Le fichier Silver final chargé dans PostgreSQL est la fusion dédupliquée de `file1_good` et `recovered`.
 
-- `file1_good`
-- `recovered`
+### PostgreSQL
 
-### Chargement PostgreSQL
-
-- La sortie Silver est chargée dans PostgreSQL
-- Le schéma relationnel est créé si nécessaire avant chargement
+- La sortie Silver est chargée dans PostgreSQL via `dags/scripts/load_to_postgres.py`
+- Le schéma relationnel est créé ou mis à jour avec `dags/sql/create_tables.sql`
 - L'historique des imports est stocké dans `etl_import_history`
-- Des index sont créés pour accélérer les recherches et certains usages analytiques
-- Fichiers principaux:
-  - `dags/scripts/load_to_postgres.py`
-  - `dags/sql/create_tables.sql`
-  - `dags/sql/explain_indexes.sql`
+- Des index sont créés pour accélérer les recherches et les analyses
+- Le fichier `dags/sql/explain_indexes.sql` documente les index et leur rôle
 
 ## 4. Pipeline Airflow
 
-Le DAG principal est `openfood_pipeline_canada`.
+Le DAG principal est `openfood_pipeline_united_states`.
 
-Ordre des tâches:
+Ordre des tâches :
 
 1. `extract_products`
 2. `upload_to_minio`
@@ -126,59 +125,50 @@ Ordre des tâches:
 4. `second_clean_from_bad`
 5. `merge_final_clean`
 6. `load_to_postgres`
+7. `standardize_ingredients`
+8. `build_similarity_recommendations`
 
-Planification actuelle:
+Planification :
 
-- `timedelta(days=14)`
+- `schedule=timedelta(days=14)`
 - `catchup=False`
+- `retries=1`
 
-Stratégie d'ingestion:
+Stratégie d'ingestion :
 
-- premier chargement possible: dump complet OpenFoodFacts ou fichier local JSONL
-- chargements incrémentaux: delta exports non encore importés
-- rafraîchissement complet périodique pour couvrir les suppressions côté source
+- premier chargement : dump complet OpenFoodFacts ou fichier local JSONL
+- chargements incrémentaux : delta exports non encore importés
+- rafraîchissement complet périodique configurable avec `OPENFOOD_FULL_REFRESH_INTERVAL_DAYS`
+- limite de lignes possible en développement avec `OPENFOOD_MAX_ROWS`
 
-Modes de source pris en charge:
+Modes de source pris en charge :
 
-- `OPENFOOD_SOURCE_MODE=official`
-  - utilise les exports OpenFoodFacts
-  - avec `OPENFOOD_IMPORT_MODE=full`, `delta` ou `auto`
-- `OPENFOOD_SOURCE_MODE=local`
-  - utilise un fichier JSONL local défini par `OPENFOOD_LOCAL_FILE`
-  - utile pour bootstrapper le projet à partir d'un export déjà disponible
+```env
+OPENFOOD_SOURCE_MODE=official
+OPENFOOD_IMPORT_MODE=full|delta|auto
+```
 
-Options utiles d'extraction:
+```env
+OPENFOOD_SOURCE_MODE=local
+OPENFOOD_LOCAL_FILE=data/bronze/openfood/local/openfoodfacts-products.jsonl.gz
+```
 
+Options utiles d'extraction :
+
+- `OPENFOOD_COUNTRY`
 - `OPENFOOD_FULL_MODE=direct|sample`
 - `OPENFOOD_FULL_SAMPLE_SIZE`
 - `OPENFOOD_FULL_SAMPLE_STRATEGY=first|random`
 - `OPENFOOD_DELTA_MAX_FILES`
+- `OPENFOOD_MAX_ROWS`
 
-### Rôle détaillé des deux nettoyages
+### Nettoyage en deux passes
 
-#### Premier nettoyage: `first_clean_from_bronze`
+#### Premier nettoyage : `first_clean_from_bronze`
 
-Cette étape lit le JSONL Bronze depuis MinIO et transforme chaque produit vers le schéma Silver cible.
+Cette étape lit le JSONL Bronze depuis MinIO et applique `build_row(..., recovery_mode=False)` suivi de `evaluate_final_contract(...)`.
 
-Elle utilise:
-
-- `build_row(..., recovery_mode=False)`
-- `evaluate_final_contract(...)`
-
-Son objectif est de faire un premier tri qualité:
-
-- normaliser les champs principaux
-- vérifier la présence et la cohérence des données importantes
-- séparer les lignes directement exploitables des lignes encore douteuses
-
-Résultats:
-
-- `file1_good.parquet`
-  - contient les lignes qui passent déjà le contrat qualité final
-- `file2_bad.jsonl`
-  - contient les lignes qui ont encore des problèmes mais qui méritent une seconde tentative
-
-Exemples de contrôles appliqués à ce stade:
+Contrôles principaux :
 
 - qualité du nom produit
 - présence et normalisation des catégories
@@ -186,58 +176,57 @@ Exemples de contrôles appliqués à ce stade:
 - format de quantité
 - cohérence énergétique ou sel/sodium selon les champs disponibles
 
-#### Second nettoyage: `second_clean_from_bad`
+Résultats :
 
-Cette étape relit uniquement `file2_bad.jsonl`.
+- `file1_good.parquet` : lignes qui passent directement le contrat qualité final
+- `file2_bad.jsonl` : lignes à tenter de récupérer
 
-Elle applique la même logique métier générale, mais dans un mode plus tolérant:
+#### Second nettoyage : `second_clean_from_bad`
 
-- `build_row(..., recovery_mode=True)`
-- `evaluate_final_contract(...)`
+Cette étape relit uniquement `file2_bad.jsonl` et applique `build_row(..., recovery_mode=True)`.
 
-Le second nettoyage sert à récupérer les cas limites qui n'ont pas passé le premier filtre, par exemple:
+Le mode récupération est plus tolérant :
 
 - recherche du nom dans des champs alternatifs
-- récupération plus large des catégories
+- récupération élargie des catégories
 - récupération de marques via variantes linguistiques
 - réconciliation plus souple entre `nutriscore_grade` et `nutriscore_score`
 - meilleure normalisation des quantités atypiques
 
-Résultats:
+Résultats :
 
-- `recovered.parquet`
-  - lignes sauvées au second passage
-- `reject.jsonl`
-  - lignes définitivement rejetées après la seconde tentative
+- `recovered.parquet` : lignes sauvées au second passage
+- `reject.jsonl` : lignes définitivement rejetées
 
-Cette séparation permet de mieux contrôler la qualité des données:
-
-- `good` = propre dès le départ
-- `bad` = encore récupérable
-- `recovered` = corrigé avec succès
-- `reject` = non exploitable en l'état
-
-Fichier DAG:
-
-- `dags/openfood_pipeline_dag.py`
+Fichier DAG : `dags/openfood_pipeline_dag.py`
 
 ## 5. Base PostgreSQL
 
-Le schéma SQL couvre les entités principales du domaine produit et les tables d'association nécessaires.
+La base métier est définie par `POSTGRES_DB=openfood_db` dans l'environnement par défaut.
 
-Le chargement alimente notamment:
+Tables principales :
 
-- `produit`
-- `valeurs_nutritionnelles`
-- `categorie`
-- `ingredient`
-- `marque`
-- `allergene`
-- `label`
-- `pays`
-- `etl_import_history`
+- `produit` : fiche produit, code OpenFoodFacts, nom, quantité, NutriScore, NOVA, image, URL
+- `valeurs_nutritionnelles` : sucre, sel, graisses saturées, fibres, protéines, énergie
+- `marque` : marques produits
+- `categorie` : catégories et groupes nutritionnels
+- `ingredient` : ingrédients bruts
+- `ingredient_standardise` : forme canonique d'un ingrédient
+- `synonyme_ingredient` : synonymes issus du clustering, du LLM ou d'une saisie manuelle
+- `allergene`, `label`, `pays` : tables de référence
+- `product_similarity` : recommandations similaires ou plus saines
+- `rejected_products_review` : produits rejetés consultables pour révision
+- `etl_import_history` : historique des imports
 
-Les index créés automatiquement sont les suivants:
+Tables d'association :
+
+- `produit_categorie`
+- `produit_ingredient`
+- `produit_allergene`
+- `produit_label`
+- `produit_pays`
+
+Index créés automatiquement :
 
 - `idx_produit_nom`
 - `idx_categorie_nom`
@@ -247,36 +236,94 @@ Les index créés automatiquement sont les suivants:
 - `idx_marque_nom`
 - `idx_pays_nom`
 - `idx_etl_import_history_imported_at`
-- `idx_etl_import_history_type_end_ts` 
+- `idx_etl_import_history_type_end_ts`
 
-## 6. Application Streamlit
+## 6. Standardisation des ingrédients
 
-Point d'entrée:
+La standardisation des ingrédients est assurée par :
 
-- `streamlit_app/main.py`
+- `dags/scripts/standardize_ingredients.py`
+- `dags/scripts/cluster_ingredients.py`
 
-Fonctionnalités disponibles:
+Le clustering TF-IDF est toujours disponible :
 
-- recherche par nom de produit
-- filtre par catégorie principale
-- recherche libre dans les catégories détaillées
-- filtre NutriScore
-- filtre sur le sucre
-- tri par NutriScore, sucre ou sel
-- page de détail produit
-- page de tendances
-- comparateur de produits
-- profil santé avec recommandations personnalisées
-- module d'administration CRUD
+- extraction des ingrédients uniques chargés dans PostgreSQL
+- vectorisation TF-IDF par n-grammes de caractères
+- similarité cosinus
+- regroupement hiérarchique avec seuil configurable
+- choix du représentant le plus fréquent comme forme canonique
+- stockage dans `ingredient_standardise` et `synonyme_ingredient`
 
-## 7. Prérequis
+Paramètres principaux :
 
-- Docker et Docker Compose
+```env
+INGREDIENT_CLUSTER_SIMILARITY=0.80
+INGREDIENT_CLUSTER_MIN_SAMPLES=2
+INGREDIENT_CLUSTER_MIN_FREQ=2
+INGREDIENT_CLUSTER_DRY_RUN=false
+```
+
+L'enrichissement LLM est optionnel :
+
+```env
+ENABLE_LLM_INGREDIENT_SYNONYMS=true
+OPENAI_API_KEY=...
+OPENAI_MODEL=gpt-4o-mini
+```
+
+Pour une remise académique ou un dépôt public, aucune clé API réelle ne doit être incluse dans le projet.
+
+## 7. Moteur de recommandation
+
+Le moteur de recommandation est défini dans `dags/scripts/build_similarity.py`.
+
+Il génère deux types de recommandations :
+
+- `similaire` : produits proches selon plusieurs critères
+- `plus_saine` : produits offrant une amélioration du score santé
+
+Modes de similarité utilisés :
+
+| Mode | Description |
+|------|-------------|
+| `meme_categorie` | Produits de même catégorie principale |
+| `profil_nutritionnel` | Distance sur les nutriments normalisés |
+| `score_nutritionnel_global` | Proximité du profil NutriScore |
+| `niveau_transformation_nova` | Proximité du niveau NOVA |
+| `similitude_ingredients` | Similarité textuelle des ingrédients |
+
+Les résultats sont stockés dans `product_similarity`.
+
+## 8. Application Streamlit
+
+Point d'entrée : `streamlit_app/main.py`
+
+Pages et fonctionnalités :
+
+- accueil : recherche, filtres, tri multicritère et cartes produits
+- détail produit : fiche complète, image, valeurs nutritionnelles et recommandations
+- insights : distributions, tendances et statistiques globales
+- comparateur : comparaison côte à côte de plusieurs produits
+- panier/favoris : sauvegarde de produits sélectionnés
+- profil santé : lecture personnalisée selon certains critères nutritionnels
+- admin : révision des produits rejetés, CRUD et suggestions de catégories
+
+Caractéristiques techniques :
+
+- connexion PostgreSQL avec SQLAlchemy
+- cache d'images produits
+- navigation multi-pages Streamlit
+- séparation des pages dans `streamlit_app/pages/`
+
+## 9. Prérequis
+
+- Docker
+- Docker Compose
 - Git
 
-## 8. Démarrage Rapide
+## 10. Démarrage Rapide
 
-Depuis la racine du projet:
+Depuis la racine du projet :
 
 ```bash
 cp .env.example .env
@@ -284,48 +331,75 @@ docker compose up -d --build
 docker compose ps
 ```
 
-Une fois la stack démarrée:
+Une fois la stack démarrée :
 
-1. Ouvrir Airflow
-2. Vérifier que le DAG `openfood_pipeline_canada` est visible
+1. Ouvrir Airflow sur http://localhost:8080
+2. Vérifier que le DAG `openfood_pipeline_united_states` est visible
 3. Configurer si nécessaire le mode de source dans `.env`
-4. Lancer un run manuel si nécessaire
-5. Ouvrir Streamlit pour consulter les données chargées
+4. Lancer un run manuel du DAG si la base doit être alimentée
+5. Ouvrir Streamlit sur http://localhost:8501
 
-Exemple pour utiliser un fichier local:
+Exemple avec une source locale :
 
 ```env
 OPENFOOD_SOURCE_MODE=local
-OPENFOOD_LOCAL_FILE=data/bronze/openfood/local/openfood_canada_local.jsonl
+OPENFOOD_LOCAL_FILE=data/bronze/openfood/local/openfoodfacts-products.jsonl.gz
+OPENFOOD_MAX_ROWS=500
 ```
 
-Exemple pour utiliser la source officielle:
+Exemple avec les exports officiels :
 
 ```env
 OPENFOOD_SOURCE_MODE=official
 OPENFOOD_IMPORT_MODE=auto
+OPENFOOD_MAX_ROWS=500
 ```
 
-## 9. Accès aux Services
+## 11. Accès aux Services
 
-- Streamlit: http://localhost:8501
-- Airflow: http://localhost:8080 `admin` / `admin123`
-- Adminer: http://localhost:8081
-- MinIO API: http://localhost:9000
-- MinIO Console: http://localhost:9001
-- JupyterLab: http://localhost:8888
+| Service | URL | Identifiants |
+|---------|-----|--------------|
+| Streamlit | http://localhost:8501 | - |
+| Airflow | http://localhost:8080 | `admin` / `admin123` |
+| Adminer | http://localhost:8081 | serveur `postgres`, utilisateur PostgreSQL |
+| MinIO API | http://localhost:9000 | - |
+| MinIO Console | http://localhost:9001 | `minioadmin` / `minioadmin123` |
+| JupyterLab | http://localhost:8888 | token `openfood2024` |
 
-Identifiants par défaut utiles:
+## 12. État Attendu du Projet
 
-- MinIO: `minioadmin` / `minioadmin123`
-- Jupyter token: `openfood2024`
-- Admin Streamlit: `admin` / `admin123` si `ADMIN_USER` et `ADMIN_PASSWORD` ne sont pas définis
+- Airflow démarre et expose le DAG `openfood_pipeline_united_states`
+- MinIO contient les buckets `bronze`, `silver` et `gold`
+- la couche Silver contient les sorties intermédiaires de nettoyage et le fichier final Parquet
+- PostgreSQL contient les tables normalisées, les index et l'historique `etl_import_history`
+- les ingrédients standardisés sont disponibles dans `ingredient_standardise` et `synonyme_ingredient`
+- les recommandations sont disponibles dans `product_similarity`
+- Streamlit permet la navigation entre recherche, détails, insights, comparaison, favoris, profil santé et administration
 
-## 10. État Attendu du Projet
+## 13. Remise Finale
 
-- Airflow démarre et expose le DAG `openfood_pipeline_canada`
-- MinIO contient les buckets `bronze`, `silver` et `gold` initialisés
-- la couche `silver` contient les sorties intermédiaires de nettoyage et le fichier final en `Parquet`
-- PostgreSQL contient les tables normalisées et `etl_import_history`
-- les index SQL sont créés
-- Streamlit permet la navigation entre dashboard, tendances, comparaison, profil santé et administration
+Livrables recommandés :
+
+- code source du projet
+- `README.md`
+- rapport final
+- présentation finale dans `PRESENTATION.md` ou dans `presentation/`
+- fichiers de documentation utiles dans `database/Docs_BD_SqlPostgre/` et `streamlit_app/Documents_app_streamlit/`
+- `.env.example` sans clé API réelle
+
+À ne pas remettre :
+
+- `.env`
+- clés API, mots de passe personnels ou secrets réels
+- dossiers `data/`, `logs/`, volumes PostgreSQL ou MinIO
+- fichiers temporaires de notebook non utilisés
+- caches Python et fichiers générés localement
+
+Avant la remise :
+
+```bash
+git status --short
+docker compose ps
+```
+
+Ces deux commandes permettent de vérifier l'état des fichiers à inclure et l'état d'exécution de la plateforme.
