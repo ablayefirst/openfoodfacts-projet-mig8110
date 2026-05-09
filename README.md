@@ -10,8 +10,8 @@ La plateforme couvre :
 - dépôt des données brutes dans MinIO, zone Bronze
 - nettoyage en deux passes et normalisation en zone Silver au format Parquet
 - chargement dans PostgreSQL selon un schéma relationnel normalisé
-- standardisation des ingrédients par clustering TF-IDF, avec enrichissement LLM optionnel
-- construction de recommandations produit via un moteur de similarité
+- standardisation des ingrédients par clustering TF-IDF et DBSCAN, avec enrichissement LLM optionnel
+- construction de recommandations produit via un moteur de similarité multimodal
 - exploration, comparaison et administration via une application Streamlit multi-pages
 
 L'architecture est orchestrée avec Docker Compose et Airflow.
@@ -68,6 +68,9 @@ extract -> upload -> first_clean -> second_clean -> merge -> load
       |
       v
 PostgreSQL : schéma normalisé, index, historique, similarités
+      |
+      +--> ingredient_standardise + synonyme_ingredient
+      +--> product_similarity
       |
       v
 Streamlit : recherche, détails, insights, comparateur, favoris, admin
@@ -185,13 +188,7 @@ Résultats :
 
 Cette étape relit uniquement `file2_bad.jsonl` et applique `build_row(..., recovery_mode=True)`.
 
-Le mode récupération est plus tolérant :
-
-- recherche du nom dans des champs alternatifs
-- récupération élargie des catégories
-- récupération de marques via variantes linguistiques
-- réconciliation plus souple entre `nutriscore_grade` et `nutriscore_score`
-- meilleure normalisation des quantités atypiques
+Le mode récupération est plus tolérant : noms alternatifs, catégories élargies, réconciliation NutriScore, marques via variantes linguistiques et quantités atypiques.
 
 Résultats :
 
@@ -226,21 +223,9 @@ Tables d'association :
 - `produit_label`
 - `produit_pays`
 
-Index créés automatiquement :
-
-- `idx_produit_nom`
-- `idx_categorie_nom`
-- `idx_ingredient_nom`
-- `idx_allergene_nom`
-- `idx_label_nom`
-- `idx_marque_nom`
-- `idx_pays_nom`
-- `idx_etl_import_history_imported_at`
-- `idx_etl_import_history_type_end_ts`
-
 ## 6. Standardisation des ingrédients
 
-La standardisation des ingrédients est assurée par :
+Scripts :
 
 - `dags/scripts/standardize_ingredients.py`
 - `dags/scripts/cluster_ingredients.py`
@@ -248,20 +233,11 @@ La standardisation des ingrédients est assurée par :
 Le clustering TF-IDF est toujours disponible :
 
 - extraction des ingrédients uniques chargés dans PostgreSQL
-- vectorisation TF-IDF par n-grammes de caractères
-- similarité cosinus
-- regroupement hiérarchique avec seuil configurable
+- vectorisation TF-IDF par n-grammes de caractères 2-4
+- regroupement avec DBSCAN sur distance cosinus
+- seuil de similarité configurable avec `INGREDIENT_CLUSTER_SIMILARITY`
 - choix du représentant le plus fréquent comme forme canonique
 - stockage dans `ingredient_standardise` et `synonyme_ingredient`
-
-Paramètres principaux :
-
-```env
-INGREDIENT_CLUSTER_SIMILARITY=0.80
-INGREDIENT_CLUSTER_MIN_SAMPLES=2
-INGREDIENT_CLUSTER_MIN_FREQ=2
-INGREDIENT_CLUSTER_DRY_RUN=false
-```
 
 L'enrichissement LLM est optionnel :
 
@@ -307,13 +283,6 @@ Pages et fonctionnalités :
 - panier/favoris : sauvegarde de produits sélectionnés
 - profil santé : lecture personnalisée selon certains critères nutritionnels
 - admin : révision des produits rejetés, CRUD et suggestions de catégories
-
-Caractéristiques techniques :
-
-- connexion PostgreSQL avec SQLAlchemy
-- cache d'images produits
-- navigation multi-pages Streamlit
-- séparation des pages dans `streamlit_app/pages/`
 
 ## 9. Prérequis
 
@@ -375,31 +344,3 @@ OPENFOOD_MAX_ROWS=500
 - les ingrédients standardisés sont disponibles dans `ingredient_standardise` et `synonyme_ingredient`
 - les recommandations sont disponibles dans `product_similarity`
 - Streamlit permet la navigation entre recherche, détails, insights, comparaison, favoris, profil santé et administration
-
-## 13. Remise Finale
-
-Livrables recommandés :
-
-- code source du projet
-- `README.md`
-- rapport final
-- présentation finale dans `PRESENTATION.md` ou dans `presentation/`
-- fichiers de documentation utiles dans `database/Docs_BD_SqlPostgre/` et `streamlit_app/Documents_app_streamlit/`
-- `.env.example` sans clé API réelle
-
-À ne pas remettre :
-
-- `.env`
-- clés API, mots de passe personnels ou secrets réels
-- dossiers `data/`, `logs/`, volumes PostgreSQL ou MinIO
-- fichiers temporaires de notebook non utilisés
-- caches Python et fichiers générés localement
-
-Avant la remise :
-
-```bash
-git status --short
-docker compose ps
-```
-
-Ces deux commandes permettent de vérifier l'état des fichiers à inclure et l'état d'exécution de la plateforme.

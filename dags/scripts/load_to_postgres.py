@@ -384,6 +384,71 @@ def get_or_create(cur, table: str, id_col: str, value_col: str, value: str):
     return cur.fetchone()[0]
 
 
+def normalize_lookup_text(value: str | None) -> str | None:
+    txt = clean_text(value)
+    if txt is None:
+        return None
+    txt = txt.lower().strip()
+    txt = re.sub(r"\s+", " ", txt)
+    return txt or None
+
+
+def resolve_ingredient_id(cur, ingredient_name: str, cache_ingredient: dict[str, int]) -> int:
+    """Return an ingredient id, resolving standardised synonyms when possible."""
+
+    lookup_name = normalize_lookup_text(ingredient_name)
+    if lookup_name is None:
+        raise ValueError("ingredient_name is empty")
+
+    if lookup_name in cache_ingredient:
+        return cache_ingredient[lookup_name]
+
+    cur.execute(
+        """
+        SELECT
+            s.id_ingredient,
+            s.id_standardise,
+            ist.nom_standardise
+        FROM synonyme_ingredient s
+        LEFT JOIN ingredient_standardise ist
+          ON ist.id_standardise = s.id_standardise
+        WHERE LOWER(TRIM(s.nom_synonyme)) = LOWER(TRIM(%s))
+          AND COALESCE(s.relation_type, 'exact') IN ('exact', 'traduction', 'correction')
+        ORDER BY CASE WHEN s.id_ingredient IS NOT NULL THEN 0 ELSE 1 END
+        LIMIT 1
+        """,
+        (lookup_name,),
+    )
+    row = cur.fetchone()
+    if row:
+        ingredient_id, _standardise_id, standardise_name = row
+        if ingredient_id is not None:
+            cache_ingredient[lookup_name] = ingredient_id
+            return ingredient_id
+
+        canonical_name = normalize_lookup_text(standardise_name)
+        if canonical_name is not None:
+            ingredient_id = get_or_create(
+                cur,
+                "ingredient",
+                "id_ingredient",
+                "ingredients_nom",
+                canonical_name,
+            )
+            cache_ingredient[lookup_name] = ingredient_id
+            return ingredient_id
+
+    ingredient_id = get_or_create(
+        cur,
+        "ingredient",
+        "id_ingredient",
+        "ingredients_nom",
+        lookup_name,
+    )
+    cache_ingredient[lookup_name] = ingredient_id
+    return ingredient_id
+
+
 def upsert_product(cur, row: pd.Series, marque_id):
     cur.execute(
         """
@@ -472,6 +537,9 @@ def upsert_nutrition(cur, row: pd.Series):
 
 
 def insert_link(cur, table: str, id_col: str, code_produit: str, entity_id):
+    if entity_id is None:
+        return False
+
     cur.execute(
         f"INSERT INTO {table} (code_produit, {id_col}) VALUES (%s, %s) ON CONFLICT DO NOTHING",
         (code_produit, entity_id),
@@ -622,11 +690,7 @@ def load_dataframe_rows(
         # ---- Ingredients: parse ingredients_text (robust)
         ingredients = parse_ingredients_text(row.get("ingredients_text"))
         for ing in ingredients:
-            if ing in cache_ingredient:
-                ing_id = cache_ingredient[ing]
-            else:
-                ing_id = get_or_create(cur, "ingredient", "id_ingredient", "ingredients_nom", ing)
-                cache_ingredient[ing] = ing_id
+            ing_id = resolve_ingredient_id(cur, ing, cache_ingredient)
             if insert_link(cur, "produit_ingredient", "id_ingredient", code, ing_id):
                 stats["links_inserted"] += 1
 
@@ -734,8 +798,23 @@ def load_parquet_to_postgres(
                 if not has_batches:
                     print("No rows to load from Silver Parquet.")
 
-                if import_type == "full":
+                if import_type in ("full", "local"):
                     stats["products_deleted"] = delete_missing_products_from_full_snapshot(cur, imported_codes)
+
+                if imported_codes:
+                    cur.execute(
+                        """
+                        UPDATE rejected_products_review
+                        SET review_status = 'resolved', updated_at = NOW()
+                        WHERE code_produit = ANY(%s)
+                          AND review_status NOT IN ('resolved', 'ignored')
+                        """,
+                        (list(imported_codes),),
+                    )
+                    resolved_count = cur.rowcount
+                    if resolved_count:
+                        print(f"Marked {resolved_count} previously rejected products as resolved.")
+                    stats["rejected_resolved"] = resolved_count
 
                 record_import_history(
                     cur,
@@ -756,7 +835,8 @@ def load_parquet_to_postgres(
         f"rows_skipped_missing_keys={stats['rows_skipped_missing_keys']}, "
         f"products_inserted={stats['products_inserted']}, products_updated={stats['products_updated']}, "
         f"nutrition_inserted={stats['nutrition_inserted']}, nutrition_updated={stats['nutrition_updated']}, "
-        f"links_inserted={stats['links_inserted']}, products_deleted={stats['products_deleted']}"
+        f"links_inserted={stats['links_inserted']}, products_deleted={stats['products_deleted']}, "
+        f"rejected_resolved={stats.get('rejected_resolved', 0)}"
     )
     return stats
 

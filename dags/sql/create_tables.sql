@@ -82,11 +82,43 @@ CREATE TABLE IF NOT EXISTS produit_categorie (
 );
 
 
-CREATE TABLE IF NOT EXISTS synonyme_ingredient (
-    id_synonyme SERIAL PRIMARY KEY,
-    nom_synonyme TEXT,
-    id_ingredient INT REFERENCES ingredient(id_ingredient)
+CREATE TABLE IF NOT EXISTS ingredient_standardise (
+    id_standardise   SERIAL PRIMARY KEY,
+    nom_standardise  TEXT NOT NULL UNIQUE,
+    frequence        INT  NOT NULL DEFAULT 0,
+    cluster_id       INT,
+    created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS synonyme_ingredient (
+    id_synonyme      SERIAL PRIMARY KEY,
+    nom_synonyme     TEXT,
+    id_ingredient    INT REFERENCES ingredient(id_ingredient),
+    id_standardise   INT REFERENCES ingredient_standardise(id_standardise),
+    langue           TEXT,
+    source           TEXT DEFAULT 'manual',
+    relation_type    TEXT DEFAULT 'exact',
+    confidence       NUMERIC(5,2),
+    created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+ALTER TABLE synonyme_ingredient
+ADD COLUMN IF NOT EXISTS langue TEXT;
+
+ALTER TABLE synonyme_ingredient
+ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual';
+
+ALTER TABLE synonyme_ingredient
+ADD COLUMN IF NOT EXISTS relation_type TEXT DEFAULT 'exact';
+
+ALTER TABLE synonyme_ingredient
+ADD COLUMN IF NOT EXISTS confidence NUMERIC(5,2);
+
+ALTER TABLE synonyme_ingredient
+ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;
+
+ALTER TABLE synonyme_ingredient
+ADD COLUMN IF NOT EXISTS id_standardise INT REFERENCES ingredient_standardise(id_standardise);
 
 
 CREATE TABLE IF NOT EXISTS produit_ingredient (
@@ -131,6 +163,53 @@ CREATE TABLE IF NOT EXISTS etl_import_history (
 );
 
 -- =====================================================
+-- REVUE DES PRODUITS REJETES ET SUGGESTIONS DE CATEGORIES
+-- =====================================================
+
+CREATE TABLE IF NOT EXISTS rejected_products_review (
+    rejected_id SERIAL PRIMARY KEY,
+    code_produit TEXT NOT NULL,
+    product_name TEXT,
+    brands TEXT,
+    raw_payload JSONB NOT NULL,
+    corrected_payload JSONB,
+    quality_issues JSONB NOT NULL,
+    source_run_id TEXT,
+    source_task TEXT,
+    import_type TEXT,
+    review_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (review_status IN ('pending', 'suggested', 'validated', 'resolved', 'ignored', 'needs_review')),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+ALTER TABLE rejected_products_review
+ADD COLUMN IF NOT EXISTS corrected_payload JSONB;
+
+ALTER TABLE rejected_products_review
+DROP CONSTRAINT IF EXISTS rejected_products_review_review_status_check;
+
+ALTER TABLE rejected_products_review
+ADD CONSTRAINT rejected_products_review_review_status_check
+CHECK (review_status IN ('pending', 'suggested', 'validated', 'resolved', 'ignored', 'needs_review'));
+
+CREATE TABLE IF NOT EXISTS product_category_suggestions (
+    suggestion_id SERIAL PRIMARY KEY,
+    rejected_id INTEGER NOT NULL REFERENCES rejected_products_review(rejected_id) ON DELETE CASCADE,
+    code_produit TEXT NOT NULL,
+    suggested_categories TEXT,
+    suggested_categories_tags JSONB,
+    suggested_categorie_principale TEXT,
+    suggestion_source TEXT NOT NULL,
+    suggestion_confidence NUMERIC(5,2),
+    decision_status TEXT NOT NULL DEFAULT 'suggested'
+        CHECK (decision_status IN ('suggested', 'validated', 'rejected', 'needs_review', 'applied')),
+    validated_by TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =====================================================
 -- RECOMMANDATIONS PRODUITS
 -- =====================================================
 
@@ -142,10 +221,13 @@ CREATE TABLE IF NOT EXISTS produit_similaire (
     nb_ingredients_communs INTEGER,
     ingredients_communs TEXT,
     methode TEXT,
+    mode_sante TEXT,
     health_score_source NUMERIC,
     health_score_cible NUMERIC,
     PRIMARY KEY (code_produit_source, code_produit_cible, type_recommandation)
 );
+
+ALTER TABLE produit_similaire ADD COLUMN IF NOT EXISTS mode_sante TEXT;
 
 -- =====================================================
 -- INDEX POUR PERFORMANCE (APP WEB + ETL)
@@ -182,5 +264,89 @@ WHERE sugars_100g IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_etl_import_history_imported_at ON etl_import_history(imported_at);
 CREATE INDEX IF NOT EXISTS idx_etl_import_history_type_end_ts ON etl_import_history(import_type, source_end_ts);
+CREATE INDEX IF NOT EXISTS idx_rejected_products_review_code
+ON rejected_products_review(code_produit);
+CREATE INDEX IF NOT EXISTS idx_rejected_products_review_status
+ON rejected_products_review(review_status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_product_category_suggestions_code
+ON product_category_suggestions(code_produit);
+CREATE INDEX IF NOT EXISTS idx_product_category_suggestions_status
+ON product_category_suggestions(decision_status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_product_category_suggestions_rejected_id
+ON product_category_suggestions(rejected_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_product_category_suggestions_active
+ON product_category_suggestions(rejected_id)
+WHERE decision_status IN ('suggested', 'validated', 'needs_review');
 CREATE INDEX IF NOT EXISTS idx_produit_similaire_source_type
 ON produit_similaire(code_produit_source, type_recommandation);
+
+CREATE INDEX IF NOT EXISTS idx_synonyme_ingredient_id_ingredient
+ON synonyme_ingredient(id_ingredient);
+
+CREATE INDEX IF NOT EXISTS idx_synonyme_ingredient_nom_trgm
+ON synonyme_ingredient USING gin (LOWER(COALESCE(nom_synonyme, '')) gin_trgm_ops);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_synonyme_ingredient_nom_unique
+ON synonyme_ingredient(LOWER(TRIM(nom_synonyme)))
+WHERE nom_synonyme IS NOT NULL AND TRIM(nom_synonyme) <> '';
+
+DROP VIEW IF EXISTS ingredient_lookup;
+CREATE OR REPLACE VIEW ingredient_lookup AS
+-- Ingrédients standardisés (représentants de cluster)
+SELECT
+    ist.id_standardise::TEXT          AS id_ref,
+    ist.nom_standardise               AS nom_recherche,
+    LOWER(TRIM(ist.nom_standardise))  AS nom_recherche_normalise,
+    ist.nom_standardise               AS nom_canonique,
+    'standardise'                     AS source,
+    'exact'                           AS relation_type
+FROM ingredient_standardise ist
+WHERE TRIM(ist.nom_standardise) <> ''
+
+UNION ALL
+
+-- Synonymes pointant vers un standardisé (source cluster ou llm)
+SELECT
+    s.id_standardise::TEXT            AS id_ref,
+    s.nom_synonyme                    AS nom_recherche,
+    LOWER(TRIM(s.nom_synonyme))       AS nom_recherche_normalise,
+    ist.nom_standardise               AS nom_canonique,
+    COALESCE(NULLIF(TRIM(s.source), ''), 'synonyme') AS source,
+    COALESCE(NULLIF(TRIM(s.relation_type), ''), 'exact') AS relation_type
+FROM synonyme_ingredient s
+JOIN ingredient_standardise ist ON ist.id_standardise = s.id_standardise
+WHERE s.nom_synonyme IS NOT NULL AND TRIM(s.nom_synonyme) <> ''
+
+UNION ALL
+
+-- Synonymes historiques pointant seulement vers ingredient (avant standardisation)
+SELECT
+    s.id_ingredient::TEXT             AS id_ref,
+    s.nom_synonyme                    AS nom_recherche,
+    LOWER(TRIM(s.nom_synonyme))       AS nom_recherche_normalise,
+    i.ingredients_nom                 AS nom_canonique,
+    COALESCE(NULLIF(TRIM(s.source), ''), 'synonyme') AS source,
+    COALESCE(NULLIF(TRIM(s.relation_type), ''), 'exact') AS relation_type
+FROM synonyme_ingredient s
+JOIN ingredient i ON i.id_ingredient = s.id_ingredient
+WHERE s.id_standardise IS NULL
+  AND s.nom_synonyme IS NOT NULL
+  AND TRIM(s.nom_synonyme) <> ''
+
+UNION ALL
+
+-- Ingrédients bruts sans standardisé (fallback)
+SELECT
+    i.id_ingredient::TEXT             AS id_ref,
+    i.ingredients_nom                 AS nom_recherche,
+    LOWER(TRIM(i.ingredients_nom))    AS nom_recherche_normalise,
+    i.ingredients_nom                 AS nom_canonique,
+    'ingredient'                      AS source,
+    'exact'                           AS relation_type
+FROM ingredient i
+WHERE i.ingredients_nom IS NOT NULL AND TRIM(i.ingredients_nom) <> ''
+  AND NOT EXISTS (
+      SELECT 1 FROM synonyme_ingredient s
+      WHERE s.id_ingredient = i.id_ingredient
+        AND s.id_standardise IS NOT NULL
+  );

@@ -11,7 +11,9 @@ from sqlalchemy import (
     select,
     func,
     Numeric,
+    DateTime,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 
 # Base commune à tous les modèles ORM
 Base = declarative_base()
@@ -84,6 +86,43 @@ class ValeursNutritionnelles(Base):
     carbohydrates_100g = Column(Numeric)
     fat_100g = Column(Numeric)
 
+
+
+class RejectedProductReview(Base):
+    """Produits rejetés par le pipeline et en attente de revue manuelle."""
+    __tablename__ = "rejected_products_review"
+
+    rejected_id = Column(Integer, primary_key=True)
+    code_produit = Column(Text, nullable=False)
+    product_name = Column(Text)
+    brands = Column(Text)
+    raw_payload = Column(JSONB, nullable=False)
+    corrected_payload = Column(JSONB)
+    quality_issues = Column(JSONB, nullable=False)
+    source_run_id = Column(Text)
+    source_task = Column(Text)
+    import_type = Column(Text)
+    review_status = Column(Text, nullable=False, default="pending")
+    created_at = Column(DateTime)
+    updated_at = Column(DateTime)
+
+
+class ProductCategorySuggestion(Base):
+    """Suggestion automatique de catégorie validable par l'utilisateur."""
+    __tablename__ = "product_category_suggestions"
+
+    suggestion_id = Column(Integer, primary_key=True)
+    rejected_id = Column(Integer, ForeignKey("rejected_products_review.rejected_id"))
+    code_produit = Column(Text, nullable=False)
+    suggested_categories = Column(Text)
+    suggested_categories_tags = Column(JSONB)
+    suggested_categorie_principale = Column(Text)
+    suggestion_source = Column(Text, nullable=False)
+    suggestion_confidence = Column(Numeric(5, 2))
+    decision_status = Column(Text, nullable=False, default="suggested")
+    validated_by = Column(Text)
+    created_at = Column(DateTime)
+    updated_at = Column(DateTime)
 
 
 class Product(Base):
