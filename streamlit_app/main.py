@@ -12,7 +12,6 @@ Ce module gère :
 
 import os
 import math
-import random
 import sys
 import warnings
 from pathlib import Path
@@ -108,10 +107,6 @@ conn = get_connection()
 if "selected_code" not in st.session_state:
     # Code du produit actuellement sélectionné pour la page de détail
     st.session_state.selected_code = None
-
-if "home_selection" not in st.session_state:
-    # Échantillon de produits pour la page d'accueil (cas "is_home")
-    st.session_state.home_selection = None
 
 if "page" not in st.session_state:
     # Index de la page courante de pagination (1-based)
@@ -294,7 +289,6 @@ else:
     # et on invalide la sélection "home" (pour la recalculer).
     if st.session_state["last_filters_signature"] != current_filters_signature:
         st.session_state.page = 1
-        st.session_state.home_selection = None
         st.session_state["last_filters_signature"] = current_filters_signature
 
 ########################################
@@ -477,7 +471,8 @@ elif sort_option == "Sel (g/100g)":
 ########################################
 
 # Vue d'accueil par défaut ? (aucune recherche, aucun filtre texte/catégorie,
-# sucre par défaut). Dans ce cas, on affiche un petit échantillon.
+# sucre par défaut). On garde tous les résultats paginés, en mettant simplement
+# les produits avec image en premier pour une page d'accueil plus visuelle.
 is_home = (
     (not search_name)
     and (not search_code)
@@ -487,49 +482,25 @@ is_home = (
     and max_sugar == 50.0
 )
 
-if is_home:
-    if st.session_state.home_selection is None:
-        if df.empty:
-            st.session_state.home_selection = df.copy()
-        else:
-            mask_img = df["image_url"].notna() & df["image_url"].astype(str).str.strip().ne("")
-            df_with_img = df[mask_img]
+if is_home and not df.empty:
+    has_image = df["image_url"].notna() & df["image_url"].astype(str).str.strip().ne("")
+    df = (
+        df.assign(_has_image=has_image.astype(int))
+        .sort_values(by="_has_image", ascending=False, kind="mergesort")
+        .drop(columns="_has_image")
+    )
 
-            if len(df_with_img) >= 10:
-                selection = df_with_img.sample(10, random_state=random.randint(0, 1_000_000))
-            else:
-                df_without_img = df[~mask_img]
-                needed = max(0, 10 - len(df_with_img))
-                extras = pd.DataFrame()
-                if needed > 0 and len(df_without_img) > 0:
-                    extras = df_without_img.sample(
-                        min(needed, len(df_without_img)),
-                        random_state=random.randint(0, 1_000_000),
-                    )
-                selection = pd.concat([df_with_img, extras]).head(10)
+# On pagine sur le DataFrame `df` TEL QU'IL EST après tous les filtres
+# (recherche, catégories, NutriScore, sucre, profil santé, etc.).
+items_per_page = 10
+total_pages = max(1, (len(df) + items_per_page - 1) // items_per_page)
 
-            st.session_state.home_selection = selection.reset_index(drop=True)
+if st.session_state.page > total_pages:
+    st.session_state.page = total_pages
 
-    df_page = st.session_state.home_selection.copy()
-    items_per_page = len(df_page)
-    total_pages = 1
-    st.session_state.page = 1
-else:
-    st.session_state.home_selection = None
-
-    # Cas général : on pagine sur le DataFrame `df` TEL QU'IL EST après
-    # tous les filtres (recherche, catégories, NutriScore, sucre, profil santé, etc.).
-    items_per_page = 10
-
-    total_pages = max(1, (len(df) + items_per_page - 1) // items_per_page)
-
-    if st.session_state.page > total_pages:
-        st.session_state.page = total_pages
-
-    start = (st.session_state.page - 1) * items_per_page
-    end = start + items_per_page
-
-    df_page = df.iloc[start:end]
+start = (st.session_state.page - 1) * items_per_page
+end = start + items_per_page
+df_page = df.iloc[start:end].reset_index(drop=True)
 
 ########################################
 # AFFICHAGE EN CARTES (LISTE DES PRODUITS)
@@ -557,8 +528,8 @@ if selected_codes:
 # 2 cartes par ligne
 cols = st.columns(2)
 
-for index, row in df_page.iterrows():
-    col = cols[index % 2]
+for position, (_, row) in enumerate(df_page.iterrows()):
+    col = cols[position % 2]
 
     # Limiter le nombre de catégories affichées (max 3)
     categories_display = row.get("categories", "Non spécifiée")
@@ -690,23 +661,27 @@ for index, row in df_page.iterrows():
         st.markdown("---")
 
 # ==============================
-# ⬅️ ➡️ BOUTONS PAGINATION (sauf accueil aléatoire)
+# ⬅️ ➡️ BOUTONS PAGINATION
 # ==============================
 
-if not is_home:
+if total_pages > 1:
     col1, col2, col3 = st.columns([1, 2, 1])
 
     with col1:
-        if st.button("⬅️ Page précédente") and st.session_state.page > 1:
+        if st.button("⬅️ Page précédente", disabled=st.session_state.page <= 1):
             st.session_state.page -= 1
             st.rerun()
 
+    with col2:
+        st.markdown(
+            f"<div style='text-align:center; padding-top:0.45rem;'>Page {st.session_state.page} / {total_pages}</div>",
+            unsafe_allow_html=True,
+        )
+
     with col3:
-        if st.button("Page suivante ➡️") and st.session_state.page < total_pages:
+        if st.button("Page suivante ➡️", disabled=st.session_state.page >= total_pages):
             st.session_state.page += 1
             st.rerun()
-
-    st.write(f"Page {st.session_state.page} / {total_pages}")
 
 # (Optionnel mais propre) : fermer la connexion
 try:
