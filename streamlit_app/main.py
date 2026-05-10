@@ -223,12 +223,22 @@ with col3:
     )
 
 with col4:
-    # Filtre quantitatif sur le sucre (borne haute en g/100g)
-    max_sugar = st.number_input("Sucre max (g/100g)", min_value=0.0, value=50.0)
+    # Filtre quantitatif optionnel sur le sucre (borne haute en g/100g).
+    # Désactivé par défaut pour afficher tout le catalogue à l'accueil.
+    enable_sugar_filter = st.checkbox("Limiter le sucre", value=False)
+    max_sugar = st.number_input(
+        "Sucre max (g/100g)",
+        min_value=0.0,
+        max_value=100.0,
+        value=100.0,
+        disabled=not enable_sugar_filter,
+    )
 
 col4, col5, col6 = st.columns(3)
 
-nutriscore_options = ["A", "B", "C", "D", "E"]
+nutriscore_grades = ["A", "B", "C", "D", "E"]
+nutriscore_missing_label = "Non renseigné"
+nutriscore_options = nutriscore_grades + [nutriscore_missing_label]
 
 with col4:
     # Filtre multiple sur les grades NutriScore autorisés
@@ -273,6 +283,7 @@ current_filters_signature = (
     search_name,
     search_code,
     selected_main_category,
+    enable_sugar_filter,
     float(max_sugar),
     tuple(nutriscore_filter),
     sort_option,
@@ -371,10 +382,11 @@ if search_ingredient:
     """
     query_params["search_ingredient"] = f"%{search_ingredient.strip().lower()}%"
 
-# Filtre sucre côté base :
+# Filtre sucre côté base, uniquement si l'utilisateur l'active :
 # - On accepte les produits sans infos nutritionnelles (v.sugars_100g IS NULL)
 # - Ou ceux dont le sucre est <= max_sugar.
-query += " AND (v.sugars_100g IS NULL OR v.sugars_100g <= %(max_sugar)s)"
+if enable_sugar_filter:
+    query += " AND (v.sugars_100g IS NULL OR v.sugars_100g <= %(max_sugar)s)"
 
 query += """
 GROUP BY p.code_produit,
@@ -432,16 +444,22 @@ if "image_url" not in df.columns:
 if "categories" not in df.columns:
     df["categories"] = "Non spécifiée"
 
-# Création de colonnes numériques nettoyées pour le sucre et le sel
-df["sugars_clean"] = clean_nutrient_series(df["sugars_100g"], 50.0)
+# Création de colonnes numériques nettoyées pour le sucre et le sel.
+# Le sucre peut atteindre 100 g/100g pour certains produits très sucrés.
+df["sugars_clean"] = clean_nutrient_series(df["sugars_100g"], 100.0)
 df["salt_clean"] = clean_nutrient_series(df["salt_100g"], 25.0)
 
 nutri_series = df["nutriscore_grade"].fillna("").astype(str).str.upper()
 
-# Application du filtre NutriScore : ne garder que les lignes dont le grade
-# est dans la liste sélectionnée. Si aucun grade sélectionné, on vide le DF.
+# Application du filtre NutriScore : on inclut aussi les produits sans NutriScore
+# lorsque l'option "Non renseigné" est sélectionnée.
 if nutriscore_filter:
-    df = df[nutri_series.isin(nutriscore_filter)]
+    selected_grades = [grade for grade in nutriscore_filter if grade in nutriscore_grades]
+    include_missing_nutriscore = nutriscore_missing_label in nutriscore_filter
+    nutri_mask = nutri_series.isin(selected_grades)
+    if include_missing_nutriscore:
+        nutri_mask = nutri_mask | ~nutri_series.isin(nutriscore_grades)
+    df = df[nutri_mask]
     nutri_series = nutri_series.loc[df.index]
 else:
     df = df.iloc[0:0]
@@ -479,7 +497,7 @@ is_home = (
     and (selected_main_category == "Toutes")
     and (not category_detail_filter)
     and (not search_ingredient)
-    and max_sugar == 50.0
+    and (not enable_sugar_filter)
 )
 
 if is_home and not df.empty:
@@ -591,7 +609,7 @@ for position, (_, row) in enumerate(df_page.iterrows()):
                     <p style="margin:2px 0;"><b>Catégorie principale:</b> {categorie_principale_display}</p>
                     <p style="margin:2px 0;"><b>Catégories détaillées:</b> {categories_display}</p>
                     <p style="margin:2px 0;"><b>NutriScore:</b> {nutriscore_display}</p>
-                    <p style="margin:2px 0;">Sucre: {format_grams(clean_nutrient_value(row['sugars_100g'], 50.0))}</p>
+                    <p style="margin:2px 0;">Sucre: {format_grams(clean_nutrient_value(row['sugars_100g'], 100.0))}</p>
                     <p style="margin:2px 0;">Sel: {format_grams(clean_nutrient_value(row['salt_100g'], 25.0))}</p>
                 </div>
             </div>
