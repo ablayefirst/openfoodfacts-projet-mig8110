@@ -70,7 +70,7 @@ extract -> upload -> first_clean -> second_clean -> merge -> load
 PostgreSQL : schéma normalisé, index, historique, similarités
       |
       +--> ingredient_standardise + synonyme_ingredient
-      +--> product_similarity
+      +--> produit_similaire
       |
       v
 Streamlit : recherche, détails, insights, comparateur, favoris, admin
@@ -211,7 +211,7 @@ Tables principales :
 - `ingredient_standardise` : forme canonique d'un ingrédient
 - `synonyme_ingredient` : synonymes issus du clustering, du LLM ou d'une saisie manuelle
 - `allergene`, `label`, `pays` : tables de référence
-- `product_similarity` : recommandations similaires ou plus saines
+- `produit_similaire` : recommandations similaires ou plus saines
 - `rejected_products_review` : produits rejetés consultables pour révision
 - `etl_import_history` : historique des imports
 
@@ -268,7 +268,7 @@ Modes de similarité utilisés :
 | `niveau_transformation_nova` | Proximité du niveau NOVA |
 | `similitude_ingredients` | Similarité textuelle des ingrédients |
 
-Les résultats sont stockés dans `product_similarity`.
+Les résultats sont stockés dans `produit_similaire`.
 
 ## 8. Application Streamlit
 
@@ -342,5 +342,5 @@ OPENFOOD_MAX_ROWS=500
 - la couche Silver contient les sorties intermédiaires de nettoyage et le fichier final Parquet
 - PostgreSQL contient les tables normalisées, les index et l'historique `etl_import_history`
 - les ingrédients standardisés sont disponibles dans `ingredient_standardise` et `synonyme_ingredient`
-- les recommandations sont disponibles dans `product_similarity`
+- les recommandations sont disponibles dans `produit_similaire`
 - Streamlit permet la navigation entre recherche, détails, insights, comparaison, favoris, profil santé et administration
