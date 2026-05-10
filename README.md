@@ -114,7 +114,6 @@ Le fichier Silver final chargé dans PostgreSQL est la fusion dédupliquée de `
 - Le schéma relationnel est créé ou mis à jour avec `dags/sql/create_tables.sql`
 - L'historique des imports est stocké dans `etl_import_history`
 - Des index sont créés pour accélérer les recherches et les analyses
-- Le fichier `dags/sql/explain_indexes.sql` documente les index et leur rôle
 
 ## 4. Pipeline Airflow
 
@@ -281,7 +280,6 @@ Pages et fonctionnalités :
 - insights : distributions, tendances et statistiques globales
 - comparateur : comparaison côte à côte de plusieurs produits
 - panier/favoris : sauvegarde de produits sélectionnés
-- profil santé : lecture personnalisée selon certains critères nutritionnels
 - admin : révision des produits rejetés, CRUD et suggestions de catégories
 
 ## 9. Prérequis
@@ -343,4 +341,4 @@ OPENFOOD_MAX_ROWS=500
 - PostgreSQL contient les tables normalisées, les index et l'historique `etl_import_history`
 - les ingrédients standardisés sont disponibles dans `ingredient_standardise` et `synonyme_ingredient`
 - les recommandations sont disponibles dans `produit_similaire`
-- Streamlit permet la navigation entre recherche, détails, insights, comparaison, favoris, profil santé et administration
+- Streamlit permet la navigation entre recherche, détails, insights, comparaison, favoris et administration
